@@ -189,9 +189,11 @@ Each phase ends with: `cargo build --release`, `cargo test`, `cargo clippy -- -D
 - The log confirms no hook or timer survives after a drag.
 - Idle CPU is still 0.0%.
 
-**Built (2026-10-13), awaiting Tom's manual test.** Also: `settings.json` gained `snapping` (edge spanning, radius,
+**Field-verified by Tom (2026-10-13), all 16 checks; the admin-window notice was fixed after his test.** Also: `settings.json` gained `snapping` (edge spanning, radius,
 excluded apps) and `overlay` (colours, opacity, numbers); an older `settings.json` gets the new keys added on load.
 Esc during a drag cancels the snap. Fixed-size windows keep their size and go to the zone's top-left (as FancyZones).
+Admin windows: while one is in front Windows hides key presses from a non-admin app (UIPI), so Shift can't be
+seen; the notice is shown when the drag starts, once per window (as FancyZones), and no drag hooks are set up.
 
 ### Phase 2 — Gaming zone
 - [ ] gz-core: `GamingZone`, `gz*` built-in guides, aspect and integer-scale maths with unit tests, clamping, `gaming_over_taskbar`.

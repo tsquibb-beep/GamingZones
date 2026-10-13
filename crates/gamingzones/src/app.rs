@@ -55,8 +55,8 @@ pub struct App {
     self_elevated: bool,
     movesize_hook: Option<WinEventHook>,
     drag: Option<Drag>,
-    /// Elevated windows we've already shown the "can't move it" notice for.
-    elevated_warned: HashSet<Hwnd>,
+    /// Windows we've already shown a "can't snap this" notice for.
+    warned: HashSet<Hwnd>,
 }
 
 /// Creates the hidden window; the app lives in its handler until the window is destroyed.
@@ -72,7 +72,7 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
         self_elevated: process::current_is_elevated().unwrap_or(false),
         movesize_hook: None,
         drag: None,
-        elevated_warned: HashSet::new(),
+        warned: HashSet::new(),
     };
     // A hidden top-level window rather than a message-only one: only top-level windows get
     // the TaskbarCreated and WM_DISPLAYCHANGE broadcasts.
@@ -232,7 +232,20 @@ impl App {
                 return;
             }
         };
-        let drag = Drag::start(hwnd, window, target.exe, target.elevated, &DRAG_MESSAGES);
+        if target.elevated {
+            // Windows hides key presses from us while an admin window is in front, so we
+            // can't tell whether Shift is held: say so at the start of the drag, as FancyZones does.
+            log::debug!("Drag of {} ({window}) ignored: it runs as administrator", target.exe);
+            if self.warned.insert(window) {
+                log::warn!("{} runs as administrator and GamingZones doesn't, so it can't be snapped", target.exe);
+                self.notify(
+                    "Can't snap this window",
+                    &format!("{} runs as administrator. Run GamingZones as administrator to snap it.", target.exe),
+                );
+            }
+            return;
+        }
+        let drag = Drag::start(hwnd, window, target.exe, &DRAG_MESSAGES);
         log::debug!(
             "Drag of {} ({window}) started; hooks: {} WinEvent, keyboard {}",
             drag.exe,
@@ -246,14 +259,6 @@ impl App {
     fn update_drag(&mut self) {
         let Some(drag) = &mut self.drag else { return };
         drag.update(&self.settings, &self.zones);
-        if drag.elevated && drag.shift() && self.elevated_warned.insert(drag.window) {
-            let exe = drag.exe.clone();
-            log::warn!("{exe} runs as administrator and GamingZones doesn't, so Windows won't let it be moved");
-            self.notify(
-                "Can't snap this window",
-                &format!("{exe} runs as administrator. Run GamingZones as administrator to snap it."),
-            );
-        }
     }
 
     fn end_drag(&mut self, window: Hwnd) {
@@ -286,7 +291,7 @@ impl App {
             ),
             Err(e) => {
                 log::warn!("Snapping {exe} to zone {zones} failed: {e}");
-                if self.elevated_warned.insert(window) {
+                if self.warned.insert(window) {
                     self.notify("Couldn't snap this window", &format!("{exe}: {e}"));
                 }
             }

@@ -27,7 +27,6 @@ pub struct DragMessages {
 pub struct Drag {
     pub window: Hwnd,
     pub exe: String,
-    pub elevated: bool,
     location_hook: Option<WinEventHook>,
     _destroy_hook: Option<WinEventHook>,
     key_hook: Option<KeyboardHook>,
@@ -49,7 +48,7 @@ pub struct Drag {
 }
 
 impl Drag {
-    pub fn start(main: Hwnd, window: Hwnd, exe: String, elevated: bool, msgs: &DragMessages) -> Drag {
+    pub fn start(main: Hwnd, window: Hwnd, exe: String, msgs: &DragMessages) -> Drag {
         let location_hook = WinEventHook::new(
             event::OBJECT_LOCATIONCHANGE,
             event::OBJECT_LOCATIONCHANGE,
@@ -75,7 +74,6 @@ impl Drag {
         Drag {
             window,
             exe,
-            elevated,
             location_hook,
             _destroy_hook: destroy_hook,
             key_hook,
@@ -136,7 +134,7 @@ impl Drag {
             self.lctrl = input::key_down(vk::LCONTROL);
             self.rctrl = input::key_down(vk::RCONTROL);
         }
-        if !self.shift() || self.elevated {
+        if !self.shift() {
             self.clear();
             return;
         }
