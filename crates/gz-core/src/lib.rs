@@ -6,7 +6,9 @@
 pub mod config;
 pub mod geometry;
 pub mod hotkey;
+pub mod layout;
+pub mod store;
 
-pub use config::{LogLevel, Settings};
+pub use config::{Color, LogLevel, Settings};
 pub use geometry::{Insets, Rect};
 pub use hotkey::{Hotkey, Modifiers};

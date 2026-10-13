@@ -1,0 +1,53 @@
+{
+  "layouts": [
+    {
+      "id": "split-focus",
+      "name": "Split focus",
+      "guides": [
+        { "id": "left-col", "axis": "vertical", "anchor": { "percent": 21 } },
+        { "id": "right-col", "axis": "vertical", "anchor": { "percent": 79 } },
+        { "id": "centre-split", "axis": "vertical", "anchor": { "between": { "a": "left-col", "b": "right-col", "fraction": 0.5 } } },
+        { "id": "side-split", "axis": "horizontal", "anchor": { "percent": 50 } },
+        { "id": "centre-top", "axis": "horizontal", "anchor": { "percent": 15 } },
+        { "id": "centre-bottom", "axis": "horizontal", "anchor": { "percent": 85 } }
+      ],
+      "zones": [
+        { "left": "area.left", "right": "left-col", "top": "area.top", "bottom": "side-split" },
+        { "left": "area.left", "right": "left-col", "top": "side-split", "bottom": "area.bottom" },
+        { "left": "left-col", "right": "right-col", "top": "area.top", "bottom": "centre-top" },
+        { "left": "left-col", "right": "centre-split", "top": "centre-top", "bottom": "centre-bottom" },
+        { "left": "centre-split", "right": "right-col", "top": "centre-top", "bottom": "centre-bottom" },
+        { "left": "left-col", "right": "right-col", "top": "centre-bottom", "bottom": "area.bottom" },
+        { "left": "right-col", "right": "area.right", "top": "area.top", "bottom": "side-split" },
+        { "left": "right-col", "right": "area.right", "top": "side-split", "bottom": "area.bottom" }
+      ]
+    },
+    {
+      "id": "wfh",
+      "name": "WFH",
+      "guides": [
+        { "id": "mid-x", "axis": "vertical", "anchor": { "percent": 50 } },
+        { "id": "mid-y", "axis": "horizontal", "anchor": { "percent": 50 } }
+      ],
+      "zones": [
+        { "left": "area.left", "right": "mid-x", "top": "area.top", "bottom": "mid-y" },
+        { "left": "mid-x", "right": "area.right", "top": "area.top", "bottom": "mid-y" },
+        { "left": "area.left", "right": "mid-x", "top": "mid-y", "bottom": "area.bottom" },
+        { "left": "mid-x", "right": "area.right", "top": "mid-y", "bottom": "area.bottom" }
+      ]
+    },
+    {
+      "id": "slay",
+      "name": "Slay",
+      "guides": [
+        { "id": "left-col", "axis": "vertical", "anchor": { "percent": 26 } },
+        { "id": "right-col", "axis": "vertical", "anchor": { "percent": 74 } }
+      ],
+      "zones": [
+        { "left": "area.left", "right": "left-col", "top": "area.top", "bottom": "area.bottom" },
+        { "left": "left-col", "right": "right-col", "top": "area.top", "bottom": "area.bottom" },
+        { "left": "right-col", "right": "area.right", "top": "area.top", "bottom": "area.bottom" }
+      ]
+    }
+  ]
+}
