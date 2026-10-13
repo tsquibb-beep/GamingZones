@@ -8,14 +8,18 @@
 pub mod controls;
 pub mod dpi;
 pub mod hotkey;
+pub mod input;
 pub mod inspect;
 pub mod instance;
+pub mod keyhook;
 pub mod monitor;
+pub mod paint;
 pub mod process;
 pub mod styles;
 pub mod time;
 pub mod tray;
 pub mod window;
+pub mod winevent;
 
 pub use window::Hwnd;
 pub use windows::core::{Error, Result};
@@ -38,4 +42,8 @@ pub(crate) fn int_resource(id: u16) -> windows::core::PCWSTR {
 
 pub(crate) fn rect_from(r: windows::Win32::Foundation::RECT) -> gz_core::Rect {
     gz_core::Rect::new(r.left, r.top, r.right, r.bottom)
+}
+
+pub(crate) fn rect_to(r: gz_core::Rect) -> windows::Win32::Foundation::RECT {
+    windows::Win32::Foundation::RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
 }

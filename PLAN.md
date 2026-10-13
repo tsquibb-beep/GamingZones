@@ -165,12 +165,13 @@ Each phase ends with: `cargo build --release`, `cargo test`, `cargo clippy -- -D
 > Also: skip resizes (MOVESIZESTART fires for them too; FancyZones checks for a resize cursor), and
 > skip snapping if the window is maximised at drag end (Aero Snap / browser tab merge).
 
-- [ ] gz-core: guides, zones, resolver, deadzone flagging, JSON (de)serialisation. Unit tests for:
+- [x] gz-core: guides, zones, resolver, deadzone flagging, JSON (de)serialisation. Unit tests for:
   - the three non-gaming reference layouts;
   - cycle detection;
   - zero and negative widths.
-- [ ] Hand-written `layouts.json` with Split focus, WFH and Slay; `applied.json` per monitor.
-- [ ] Drag handling:
+- [x] Hand-written `layouts.json` with Split focus, WFH and Slay; `applied.json` per monitor.
+  (Both are written on first run if missing: layouts from `gz-core/src/default_layouts.json`, and `applied.json` with every connected monitor's stable id on the first layout.)
+- [x] Drag handling:
   1. On `MOVESIZESTART`, check the window is snappable.
   2. Track the cursor and modifiers while dragging, using a mechanism that exists only during the drag.
   3. Show the overlay when Shift is held; hide it on Shift release.
@@ -178,15 +179,19 @@ Each phase ends with: `cargo build --release`, `cargo test`, `cargo clippy -- -D
   5. Ctrl-span multi-select.
   6. On `MOVESIZEEND`, snap if a zone is selected.
   7. Tear everything down.
-- [ ] Overlay: per-monitor layered, click-through window placed directly under the dragged window. Draws zones, highlighted zone(s) and zone numbers. Colours and opacity come from settings.
-- [ ] Snapping to the visible frame with DWM compensation; skip and elevated rules as in §2.
-- [ ] Multi-monitor: zones come from the monitor under the cursor.
+- [x] Overlay: per-monitor layered, click-through window placed directly under the dragged window. Draws zones, highlighted zone(s) and zone numbers. Colours and opacity come from settings.
+- [x] Snapping to the visible frame with DWM compensation; skip and elevated rules as in §2.
+- [x] Multi-monitor: zones come from the monitor under the cursor.
 
 **Done when**
 - The ruler snapped into every zone of every layout has its visible frame exactly equal to the zone rect (verified with the debug hotkey).
 - Ctrl-span across two zones gives their bounding rectangle.
 - The log confirms no hook or timer survives after a drag.
 - Idle CPU is still 0.0%.
+
+**Built (2026-10-13), awaiting Tom's manual test.** Also: `settings.json` gained `snapping` (edge spanning, radius,
+excluded apps) and `overlay` (colours, opacity, numbers); an older `settings.json` gets the new keys added on load.
+Esc during a drag cancels the snap. Fixed-size windows keep their size and go to the zone's top-left (as FancyZones).
 
 ### Phase 2 — Gaming zone
 - [ ] gz-core: `GamingZone`, `gz*` built-in guides, aspect and integer-scale maths with unit tests, clamping, `gaming_over_taskbar`.

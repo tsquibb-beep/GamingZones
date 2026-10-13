@@ -78,10 +78,16 @@ pub mod ws {
     pub const CHILD: u32 = 0x4000_0000;
     pub const VISIBLE: u32 = 0x1000_0000;
     pub const CLIPCHILDREN: u32 = 0x0200_0000;
+    pub const CAPTION: u32 = 0x00C0_0000;
     pub const THICKFRAME: u32 = 0x0004_0000;
+    pub const MINIMIZEBOX: u32 = 0x0002_0000;
     pub const MAXIMIZEBOX: u32 = 0x0001_0000;
     pub const TABSTOP: u32 = 0x0001_0000;
+    pub const EX_TOPMOST: u32 = 0x0000_0008;
+    pub const EX_TRANSPARENT: u32 = 0x0000_0020;
     pub const EX_TOOLWINDOW: u32 = 0x0000_0080;
+    pub const EX_LAYERED: u32 = 0x0008_0000;
+    pub const EX_NOACTIVATE: u32 = 0x0800_0000;
     pub const EX_CLIENTEDGE: u32 = 0x0000_0200;
     pub const EX_CONTROLPARENT: u32 = 0x0001_0000;
 }

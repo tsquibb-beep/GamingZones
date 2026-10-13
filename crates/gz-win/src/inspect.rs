@@ -5,7 +5,8 @@ use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetClientRect, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible, IsZoomed,
+    GetAncestor, GetClassNameW, GetClientRect, GetForegroundWindow, GetWindow, GetWindowRect, IsIconic, IsWindow,
+    IsWindowVisible, IsZoomed, GA_ROOT, GW_OWNER,
 };
 
 use crate::monitor::{self, MonitorInfo};
@@ -13,6 +14,32 @@ use crate::{dpi, from_wide, process, rect_from, window, Hwnd};
 
 pub fn foreground_window() -> Option<Hwnd> {
     Hwnd::from_raw(unsafe { GetForegroundWindow() })
+}
+
+pub fn exists(hwnd: Hwnd) -> bool {
+    unsafe { IsWindow(Some(hwnd.raw())) }.as_bool()
+}
+
+pub fn is_visible(hwnd: Hwnd) -> bool {
+    unsafe { IsWindowVisible(hwnd.raw()) }.as_bool()
+}
+
+pub fn is_minimized(hwnd: Hwnd) -> bool {
+    unsafe { IsIconic(hwnd.raw()) }.as_bool()
+}
+
+pub fn is_maximized(hwnd: Hwnd) -> bool {
+    unsafe { IsZoomed(hwnd.raw()) }.as_bool()
+}
+
+/// The top-level window containing `hwnd` (itself, for a top-level window).
+pub fn root(hwnd: Hwnd) -> Option<Hwnd> {
+    Hwnd::from_raw(unsafe { GetAncestor(hwnd.raw(), GA_ROOT) })
+}
+
+/// The owner of a top-level window (dialogs are owned by their main window).
+pub fn owner(hwnd: Hwnd) -> Option<Hwnd> {
+    unsafe { GetWindow(hwnd.raw(), GW_OWNER) }.ok().and_then(Hwnd::from_raw)
 }
 
 /// `GetWindowRect`: includes the invisible resize borders on Windows 10/11.
@@ -117,9 +144,9 @@ pub fn window_info(hwnd: Hwnd) -> crate::Result<WindowInfo> {
         monitor: monitor::for_window(hwnd),
         style: window::style(hwnd),
         ex_style: window::ex_style(hwnd),
-        visible: unsafe { IsWindowVisible(hwnd.raw()) }.as_bool(),
-        minimized: unsafe { IsIconic(hwnd.raw()) }.as_bool(),
-        maximized: unsafe { IsZoomed(hwnd.raw()) }.as_bool(),
+        visible: is_visible(hwnd),
+        minimized: is_minimized(hwnd),
+        maximized: is_maximized(hwnd),
         cloaked: cloaked(hwnd),
     })
 }

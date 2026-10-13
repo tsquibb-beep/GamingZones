@@ -74,6 +74,14 @@ pub mod msg {
     pub const LBUTTONUP: u32 = wm::WM_LBUTTONUP;
     pub const RBUTTONUP: u32 = wm::WM_RBUTTONUP;
     pub const CONTEXTMENU: u32 = wm::WM_CONTEXTMENU;
+    pub const PAINT: u32 = wm::WM_PAINT;
+    pub const ERASEBKGND: u32 = wm::WM_ERASEBKGND;
+    pub const NCHITTEST: u32 = wm::WM_NCHITTEST;
+    pub const MOUSEACTIVATE: u32 = wm::WM_MOUSEACTIVATE;
+    /// `WM_NCHITTEST` result: let clicks fall through to the window below.
+    pub const HTTRANSPARENT: isize = wm::HTTRANSPARENT as isize;
+    /// `WM_MOUSEACTIVATE` result: don't activate.
+    pub const MA_NOACTIVATE: isize = wm::MA_NOACTIVATE as isize;
     /// `wParam` of `WM_SETTINGCHANGE` when the work area changed.
     pub const SPI_SETWORKAREA: usize = wm::SPI_SETWORKAREA.0 as usize;
 }
@@ -318,6 +326,50 @@ pub fn set_window_rect(hwnd: Hwnd, rect: Rect) -> crate::Result<()> {
     unsafe {
         SetWindowPos(hwnd.raw(), None, rect.left, rect.top, rect.width(), rect.height(), SWP_NOZORDER | SWP_NOACTIVATE)
     }
+}
+
+/// Shows `hwnd` without activating it, directly below `above` in the z-order (so `above`
+/// stays visible over it), at `rect`.
+pub fn show_below(hwnd: Hwnd, above: Hwnd, rect: Rect) -> crate::Result<()> {
+    unsafe {
+        SetWindowPos(
+            hwnd.raw(),
+            Some(above.raw()),
+            rect.left,
+            rect.top,
+            rect.width(),
+            rect.height(),
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+    }
+}
+
+pub fn hide(hwnd: Hwnd) {
+    unsafe {
+        let _ = ShowWindow(hwnd.raw(), SW_HIDE);
+    }
+}
+
+/// Restores a maximised or minimised window (another app's window: asynchronous, so a hung
+/// app can't block us).
+pub fn restore(hwnd: Hwnd) {
+    unsafe {
+        let _ = ShowWindowAsync(hwnd.raw(), SW_RESTORE);
+    }
+}
+
+/// Marks the whole window for repainting; WM_PAINT follows from the message loop.
+pub fn invalidate(hwnd: Hwnd) {
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd.raw()), None, false);
+    }
+}
+
+/// For a `WS_EX_LAYERED` window: draw everything at `alpha` (0-255), and make pixels of
+/// `transparent` (0x00BBGGRR) fully see-through.
+pub fn set_layered(hwnd: Hwnd, transparent: u32, alpha: u8) -> crate::Result<()> {
+    use windows::Win32::Foundation::COLORREF;
+    unsafe { SetLayeredWindowAttributes(hwnd.raw(), COLORREF(transparent), alpha, LWA_ALPHA | LWA_COLORKEY) }
 }
 
 /// Sizes a window without moving it.

@@ -1,20 +1,37 @@
-//! The hidden message window: tray icon, hotkeys, config reload.
+//! The hidden message window: tray icon, hotkeys, config reload, window drags.
 //!
 //! Everything here is driven by window messages. Between messages the thread sleeps in
-//! GetMessageW, so the app uses no CPU while idle.
+//! GetMessageW, so the app uses no CPU while idle. The only hook that exists while no
+//! window is being dragged is the move/size WinEvent hook, which Windows calls only when a
+//! drag starts or ends.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gz_core::config::{LoadOutcome, SETTINGS_FILE};
 use gz_core::{Hotkey, Settings};
+use gz_win::keyhook::KeyboardHook;
 use gz_win::tray::{self, MenuItem, TrayIcon};
 use gz_win::window::{self, msg, Background, Message, WindowHandler, WindowSpec};
-use gz_win::{hotkey, styles::ws, Hwnd};
+use gz_win::winevent::{self, event, Delivery, Filter, WinEventHook};
+use gz_win::{hotkey, input, inspect, process, styles::ws, Hwnd};
 
-use crate::{dump, logger};
+use crate::drag::{Drag, DragMessages};
+use crate::zones::ZoneConfig;
+use crate::{dump, logger, snap};
 
 /// Tray icon callback.
 const WM_TRAY: u32 = msg::APP + 1;
+/// From the move/size WinEvent hook: wParam = event, lParam = window.
+const WM_MOVESIZE: u32 = msg::APP + 2;
+/// From the drag's hooks.
+const WM_DRAG_LOCATION: u32 = msg::APP + 3;
+const WM_DRAG_DESTROY: u32 = msg::APP + 4;
+/// From the drag's keyboard hook: wParam = virtual key, lParam = 1 down / 0 up.
+const WM_DRAG_KEY: u32 = msg::APP + 5;
+
+const DRAG_MESSAGES: DragMessages =
+    DragMessages { location: WM_DRAG_LOCATION, destroy: WM_DRAG_DESTROY, key: WM_DRAG_KEY };
 
 const CMD_RELOAD: u32 = 1;
 const CMD_EDITOR: u32 = 2;
@@ -30,10 +47,16 @@ pub const RELOAD_MESSAGE: &str = "GamingZones.Reload";
 pub struct App {
     config_dir: PathBuf,
     settings: Settings,
+    zones: ZoneConfig,
     tray: Option<TrayIcon>,
     registered: Vec<i32>,
     reload_msg: u32,
     taskbar_created_msg: u32,
+    self_elevated: bool,
+    movesize_hook: Option<WinEventHook>,
+    drag: Option<Drag>,
+    /// Elevated windows we've already shown the "can't move it" notice for.
+    elevated_warned: HashSet<Hwnd>,
 }
 
 /// Creates the hidden window; the app lives in its handler until the window is destroyed.
@@ -41,10 +64,15 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
     let app = App {
         config_dir,
         settings: Settings::default(),
+        zones: ZoneConfig::default(),
         tray: None,
         registered: Vec::new(),
         reload_msg: window::register_window_message(RELOAD_MESSAGE),
         taskbar_created_msg: tray::taskbar_created_message(),
+        self_elevated: process::current_is_elevated().unwrap_or(false),
+        movesize_hook: None,
+        drag: None,
+        elevated_warned: HashSet::new(),
     };
     // A hidden top-level window rather than a message-only one: only top-level windows get
     // the TaskbarCreated and WM_DISPLAYCHANGE broadcasts.
@@ -68,9 +96,24 @@ impl App {
             Err(e) => log::error!("Could not add the tray icon: {}", e.message()),
         }
         self.reload(hwnd);
+        // Windows calls this hook only when a window drag/resize starts or ends.
+        match WinEventHook::new(
+            event::MOVESIZESTART,
+            event::MOVESIZEEND,
+            0,
+            Filter { window: None, cursor: false },
+            Delivery { target: hwnd, msg: WM_MOVESIZE, coalesce: false },
+        ) {
+            Ok(hook) => self.movesize_hook = Some(hook),
+            Err(e) => {
+                log::error!("Could not watch window drags (SetWinEventHook): {}", e.message());
+                self.notify("Zones won't work", "Could not watch window drags. Details are in the log.");
+            }
+        }
     }
 
-    /// Re-reads settings.json and applies it. On a parse error the previous settings stay.
+    /// Re-reads settings.json, layouts.json and applied.json. A file with an error keeps
+    /// its previous contents.
     fn reload(&mut self, hwnd: Hwnd) {
         let path = self.config_dir.join(SETTINGS_FILE);
         match Settings::load_or_create(&path) {
@@ -80,6 +123,9 @@ impl App {
                 match outcome {
                     LoadOutcome::Created => log::info!("Created {} with defaults", path.display()),
                     LoadOutcome::Loaded => log::info!("Loaded {}", path.display()),
+                    LoadOutcome::Upgraded => {
+                        log::info!("Loaded {} and added settings new in this version", path.display())
+                    }
                 }
             }
             Err(e) => {
@@ -91,6 +137,10 @@ impl App {
             }
         }
         self.register_hotkeys(hwnd);
+        let errors = self.zones.reload(&self.config_dir);
+        if !errors.is_empty() {
+            self.notify("Layout files have an error", &format!("{}\nDetails are in the log.", errors.join("\n")));
+        }
     }
 
     fn register_hotkeys(&mut self, hwnd: Hwnd) {
@@ -158,7 +208,94 @@ impl App {
         }
     }
 
+    fn on_move_size(&mut self, hwnd: Hwnd, m: &Message) {
+        let Some(window) = winevent::message_window(m.lparam) else { return };
+        match m.wparam as u32 {
+            event::MOVESIZESTART => self.start_drag(hwnd, window),
+            event::MOVESIZEEND => self.end_drag(window),
+            _ => {}
+        }
+    }
+
+    fn start_drag(&mut self, hwnd: Hwnd, window: Hwnd) {
+        if let Some(old) = self.drag.take() {
+            log::warn!("Drag of {} never reported its end; cleaning up", old.exe);
+        }
+        if input::cursor_is_resize() {
+            log::debug!("Resize of {window} started; ignored");
+            return;
+        }
+        let target = match snap::check(window, &self.settings.snapping, self.self_elevated) {
+            Ok(t) => t,
+            Err(skip) => {
+                log::debug!("Drag of {window} ignored: {skip}");
+                return;
+            }
+        };
+        let drag = Drag::start(hwnd, window, target.exe, target.elevated, &DRAG_MESSAGES);
+        log::debug!(
+            "Drag of {} ({window}) started; hooks: {} WinEvent, keyboard {}",
+            drag.exe,
+            WinEventHook::live_count(),
+            if KeyboardHook::is_installed() { "yes" } else { "no" }
+        );
+        self.drag = Some(drag);
+        self.update_drag();
+    }
+
+    fn update_drag(&mut self) {
+        let Some(drag) = &mut self.drag else { return };
+        drag.update(&self.settings, &self.zones);
+        if drag.elevated && drag.shift() && self.elevated_warned.insert(drag.window) {
+            let exe = drag.exe.clone();
+            log::warn!("{exe} runs as administrator and GamingZones doesn't, so Windows won't let it be moved");
+            self.notify(
+                "Can't snap this window",
+                &format!("{exe} runs as administrator. Run GamingZones as administrator to snap it."),
+            );
+        }
+    }
+
+    fn end_drag(&mut self, window: Hwnd) {
+        match &self.drag {
+            Some(d) if d.window == window => {}
+            _ => return,
+        }
+        let drag = self.drag.take().expect("checked above");
+        let exe = drag.exe.clone();
+        let target = drag.finish(); // hooks and overlay are gone after this
+        log::debug!(
+            "Drag of {exe} ended; hooks left: {} WinEvent (1 = the move/size hook), keyboard {}",
+            WinEventHook::live_count(),
+            if KeyboardHook::is_installed() { "yes" } else { "no" }
+        );
+        let Some((rect, numbers)) = target else { return };
+        let zones = numbers.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("+");
+        if inspect::is_maximized(window) {
+            log::info!("Not snapping {exe}: it was maximised at the end of the drag (Windows Snap or a tab merge)");
+            return;
+        }
+        match snap::snap_frame(window, rect) {
+            Ok(s) if s.exact() => {
+                log::info!("Snapped {exe} to zone {zones}: frame {} (passes: {})", s.frame, s.passes)
+            }
+            Ok(s) => log::warn!(
+                "Snapped {exe} to zone {zones}, but its frame is {} instead of {} (the app limits its size?)",
+                s.frame,
+                s.target
+            ),
+            Err(e) => {
+                log::warn!("Snapping {exe} to zone {zones} failed: {e}");
+                if self.elevated_warned.insert(window) {
+                    self.notify("Couldn't snap this window", &format!("{exe}: {e}"));
+                }
+            }
+        }
+    }
+
     fn on_destroy(&mut self, hwnd: Hwnd) {
+        self.drag = None;
+        self.movesize_hook = None;
         for id in self.registered.drain(..) {
             let _ = hotkey::unregister(hwnd, id);
         }
@@ -182,6 +319,28 @@ impl WindowHandler for App {
                     dump::log_foreground_window();
                 }
             }
+            WM_MOVESIZE => self.on_move_size(hwnd, m),
+            WM_DRAG_LOCATION => {
+                if let Some(drag) = &self.drag {
+                    drag.rearm();
+                }
+                self.update_drag();
+            }
+            WM_DRAG_KEY => {
+                if let Some(drag) = &mut self.drag {
+                    drag.on_key(m.wparam as u16, m.lparam != 0);
+                }
+                self.update_drag();
+            }
+            WM_DRAG_DESTROY => {
+                let window = winevent::message_window(m.lparam);
+                if self.drag.as_ref().is_some_and(|d| Some(d.window) == window) {
+                    let drag = self.drag.take().expect("checked above");
+                    log::info!("{} closed during the drag", drag.exe);
+                }
+            }
+            // Zones are worked out from the current work area at each drag, so these need
+            // nothing more than a log line.
             msg::DISPLAYCHANGE => log::debug!("WM_DISPLAYCHANGE"),
             msg::DPICHANGED => log::debug!("WM_DPICHANGED"),
             msg::SETTINGCHANGE if m.wparam == msg::SPI_SETWORKAREA => log::debug!("Work area changed"),

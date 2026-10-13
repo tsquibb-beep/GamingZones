@@ -38,6 +38,19 @@ impl Font {
         Font::from_logfont(&ncm.lfMessageFont)
     }
 
+    /// `face` with a cell height of `height_px` pixels; `weight` 400 = normal, 600 = semibold.
+    pub fn sized(face: &str, height_px: i32, weight: i32) -> crate::Result<Font> {
+        let mut lf = LOGFONTW { lfHeight: -height_px.max(1), lfWeight: weight, ..Default::default() };
+        for (d, s) in lf.lfFaceName.iter_mut().take(31).zip(face.encode_utf16()) {
+            *d = s;
+        }
+        Font::from_logfont(&lf)
+    }
+
+    pub(crate) fn handle(&self) -> HFONT {
+        self.0
+    }
+
     /// Consolas at `points` size for `dpi`.
     pub fn monospace(points: i32, dpi: u32) -> crate::Result<Font> {
         let mut lf = LOGFONTW { lfHeight: -(points * dpi as i32 + 36) / 72, lfWeight: 400, ..Default::default() };

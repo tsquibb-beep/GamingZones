@@ -1,13 +1,17 @@
 //! GamingZones tray app.
 //!
-//! Phase 0: single instance, tray icon, settings and logging, hotkey plumbing and the
-//! debug-dump hotkey. All Win32 access goes through `gz-win`; this crate has no `unsafe`.
+//! Single instance, tray icon, settings and logging, hotkeys, and Shift-drag snapping to
+//! zones. All Win32 access goes through `gz-win`; this crate has no `unsafe`.
 #![windows_subsystem = "windows"]
 #![forbid(unsafe_code)]
 
 mod app;
+mod drag;
 mod dump;
 mod logger;
+mod overlay;
+mod snap;
+mod zones;
 
 use std::path::PathBuf;
 
