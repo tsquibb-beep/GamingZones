@@ -1,0 +1,11 @@
+[package]
+name = "gz-core"
+description = "GamingZones core: geometry, layout model and config. Pure Rust, no Win32."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

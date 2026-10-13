@@ -1,0 +1,7 @@
+[package]
+name = "gz-editor"
+description = "GamingZones layout editor and settings (Phase 3; placeholder for now)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true

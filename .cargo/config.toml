@@ -1,0 +1,7 @@
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+# Link the MinGW runtime statically so the exes have no DLL dependencies.
+rustflags = ["-C", "target-feature=+crt-static"]

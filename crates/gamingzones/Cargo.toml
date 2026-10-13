@@ -1,0 +1,16 @@
+[package]
+name = "gamingzones"
+description = "GamingZones tray app: zones, hotkeys and the gaming zone"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+build = "../../res/build.rs"
+
+[dependencies]
+gz-core.workspace = true
+gz-win.workspace = true
+log.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true

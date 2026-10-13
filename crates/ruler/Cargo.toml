@@ -1,0 +1,15 @@
+[package]
+name = "ruler"
+description = "GamingZones Ruler: window measuring test tool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+build = "../../res/build.rs"
+
+[dependencies]
+gz-core.workspace = true
+gz-win.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true

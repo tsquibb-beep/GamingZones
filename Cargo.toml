@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/gz-core", "crates/gz-win", "crates/gamingzones", "crates/ruler", "crates/gz-editor"]
+
+[workspace.package]
+# Keep in sync with version.txt (the source of truth).
+version = "0.1.0"
+edition = "2021"
+authors = ["Tom Squibb"]
+license = "GPL-3.0-only"
+repository = "https://github.com/tsquibb-beep/GamingZones"
+
+[workspace.dependencies]
+gz-core = { path = "crates/gz-core" }
+gz-win = { path = "crates/gz-win" }
+log = "0.4.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+embed-resource = "3.0.12"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
