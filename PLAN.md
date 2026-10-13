@@ -27,7 +27,7 @@ This file is the source of truth for scope and order. Work one phase at a time. 
 - **No persistent low-level hooks** (`WH_KEYBOARD_LL` / `WH_MOUSE_LL`). If one is needed during a drag, install it at drag start and remove it at drag end.
 - Global shortcuts via `RegisterHotKey` (with `MOD_NOREPEAT`).
 - Window drag detection via `SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART..EVENT_SYSTEM_MOVESIZEEND, WINEVENT_OUTOFCONTEXT)`.
-- Modifier state (Shift/Ctrl) read with `GetAsyncKeyState` during drags only.
+- Modifier state (Shift/Ctrl) read during drags only: `GetAsyncKeyState` on cursor moves, plus a drag-scoped `WH_KEYBOARD_LL` hook so pressing Shift or Ctrl with a still mouse updates at once (agreed 2026-10-13).
 - Overlay windows are created at drag start and destroyed at drag end.
 - Targets: 0.0% CPU at idle (Task Manager, 10 min observation); core process private bytes under ~10 MB.
 
@@ -97,7 +97,8 @@ Zone { id, left, right, top, bottom }            // guide ids
 - **Gaming zone**: the window's *client area* equals the zone exactly, and the frame sits outside it.
   - Setting for when the client size differs from the zone: **Resize to fit** (default) or **Centre without resizing**.
 - **Overlapping zones**: the smallest zone under the cursor wins (setting can offer other rules later).
-- **Ctrl-span**: while Shift-dragging, hold Ctrl and move across zones to add them to the selection. The window snaps to the bounding rectangle of the selected zones.
+- **Ctrl-span**: while Shift-dragging, hold Ctrl and move across zones. As in FancyZones, the selection is every zone inside the bounding rectangle of the zone where Ctrl was pressed and the zone under the cursor (a range, not a cumulative add). The window snaps to the bounding rectangle of the selection.
+- **No edge spanning**: dropping on a shared border picks one zone (the overlap rule), not both.
 - **Skip**: tool windows, popups without a caption, cloaked windows, minimised windows, windows of excluded exes (settings list), and the app's own windows.
 - **Maximised windows**: restore them before snapping.
 - **Elevated windows**: if the target belongs to an elevated process and we are not elevated, show a tray balloon/toast once per window and do nothing.
@@ -151,15 +152,17 @@ Each phase ends with: `cargo build --release`, `cargo test`, `cargo clippy -- -D
 - On Tom's 6144×2560 @125% monitor, the debug log and the ruler agree to the pixel.
 - The ruler set to 1920×1080 reports a 1920×1080 client.
 
+**Result (2026-10-13):** all of the above confirmed by Tom's manual checklist. Idle CPU 0% with CPU time static; private bytes ≈ 1.7 MB.
+
 ### Phase 1 — Zone engine and Shift-drag snapping (no gaming zone)
-> **Open decisions before Phase 1** (raised after reading FancyZones, see `reference/NOTES.md`):
-> 1. Shift pressed while the mouse is still: add a drag-scoped `WH_KEYBOARD_LL` hook, or accept a refresh on the next mouse move?
-> 2. Ctrl-span: FancyZones' range from the anchor zone to the current zone, or cumulative add?
-> 3. Overlay: one constant opacity (`SetLayeredWindowAttributes`, small memory), or per-pixel alpha (~63 MB bitmap per drag at 6144×2560)?
-> 4. Overlay z-order: directly under the dragged window (FancyZones), or topmost?
-> 5. Edge spanning (dropping on a shared border snaps to both zones): wanted?
+> **Decisions (agreed 2026-10-13)**, after reading FancyZones (see `reference/NOTES.md`):
+> 1. Shift/Ctrl pressed with a still mouse: a `WH_KEYBOARD_LL` hook installed at drag start and removed at drag end.
+> 2. Ctrl-span: FancyZones' range from the anchor zone to the current zone.
+> 3. Overlay: one constant opacity (`SetLayeredWindowAttributes`), painted normally; no per-pixel alpha bitmap.
+> 4. Overlay z-order: directly under the dragged window, as FancyZones does.
+> 5. Edge spanning: not wanted.
 >
-> Also planned for Phase 1: skip resizes (MOVESIZESTART fires for them too; FancyZones checks for a resize cursor), and
+> Also: skip resizes (MOVESIZESTART fires for them too; FancyZones checks for a resize cursor), and
 > skip snapping if the window is maximised at drag end (Aero Snap / browser tab merge).
 
 - [ ] gz-core: guides, zones, resolver, deadzone flagging, JSON (de)serialisation. Unit tests for:
@@ -175,7 +178,7 @@ Each phase ends with: `cargo build --release`, `cargo test`, `cargo clippy -- -D
   5. Ctrl-span multi-select.
   6. On `MOVESIZEEND`, snap if a zone is selected.
   7. Tear everything down.
-- [ ] Overlay: per-monitor layered, topmost, click-through window. Draws zones, highlighted zone(s) and zone numbers. Colours and opacity come from settings.
+- [ ] Overlay: per-monitor layered, click-through window placed directly under the dragged window. Draws zones, highlighted zone(s) and zone numbers. Colours and opacity come from settings.
 - [ ] Snapping to the visible frame with DWM compensation; skip and elevated rules as in §2.
 - [ ] Multi-monitor: zones come from the monitor under the cursor.
 
