@@ -50,7 +50,7 @@ impl Default for Snapping {
             edge_span: false,
             edge_span_radius_px: 20,
             excluded_apps: Vec::new(),
-            deadzone_px: 400,
+            deadzone_px: 300,
             gaming_fit: GamingFit::Resize,
         }
     }

@@ -199,7 +199,7 @@ seen; the notice is shown when the drag starts, once per window (as FancyZones),
 - [x] gz-core: `GamingZone`, `gz*` built-in guides, aspect and integer-scale maths with unit tests, clamping, `gaming_over_taskbar`.
 - [x] Add Gaming-Focus to `layouts.json`.
 - [x] Client-area snapping for the gaming zone; "resize to fit / centre" setting.
-- [x] Deadzone threshold setting (default 400 px). Disabled zones are drawn greyed in the overlay (setting: greyed or hidden) and are never snap targets.
+- [x] Deadzone threshold setting (default 300 px; was 400, lowered 2026-10-13 so Split focus's 15% strips stay usable). Disabled zones are drawn greyed in the overlay (setting: greyed or hidden) and are never snap targets.
 - [x] Hotkey to snap the active window to the gaming zone (default `Win+Ctrl+Alt+G`), so borderless or fixed windows can be placed without dragging.
 
 **Done when**
@@ -209,7 +209,9 @@ seen; the notice is shown when the drag starts, once per window (as FancyZones),
 - With `gaming_over_taskbar`, a gaming zone taller than the work area is placed correctly.
 - Tested with at least one real windowed game.
 
-**Built (2026-10-13), awaiting Tom's manual test.** Details:
+**Field-verified by Tom (2026-10-13), all 14 checks, including a real game (the hotkey with borderless windowed works well).**
+Open question: `gaming_over_taskbar` places the zone correctly, but the taskbar is topmost and stays drawn over the
+overlapping part of the window; see Tom's decision on a "keep on top" option. Details:
 - JSON: `"gaming_zones": [ { "size": { "pixels": { "w", "h" } } | { "aspect": { "ratio_w", "ratio_h", "k" } } |
   { "integer_scale": { "base_w", "base_h", "scale" } }, "x": px | "centre", "y": px | "centre" } ]`, plus
   `"gaming_over_taskbar": true`. `"centre"` (the default) keeps a shipped layout centred on any monitor.
@@ -218,7 +220,7 @@ seen; the notice is shown when the drag starts, once per window (as FancyZones),
   as part of a Ctrl-span or edge span it counts as a normal zone (the frame fills the bounding rectangle).
 - Gaming-Focus is last in the built-in layouts, so new monitors still default to Split focus. An existing
   `layouts.json` isn't changed (Tom's was identical to the old defaults, so it was replaced).
-- Settings: `snapping.deadzone_px` (400), `snapping.gaming_fit` (`resize` / `centre`), `overlay.disabled_zones`
+- Settings: `snapping.deadzone_px` (300), `snapping.gaming_fit` (`resize` / `centre`), `overlay.disabled_zones`
   (`greyed` / `hidden`), `overlay.disabled_color`, `hotkeys.gaming_snap`.
 - Hotkey: the foreground window goes to the gaming zone on its own monitor, or on the first monitor (primary first)
   whose layout has one. Popups (borderless games) and owned windows are allowed here, unlike drags. A maximised
