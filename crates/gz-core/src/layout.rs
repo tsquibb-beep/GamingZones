@@ -30,7 +30,7 @@ pub enum Axis {
 }
 
 impl Axis {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Axis::Vertical => "vertical",
             Axis::Horizontal => "horizontal",
@@ -156,6 +156,9 @@ impl fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
+/// Guide id → (axis, position in screen px).
+pub type GuidePositions = HashMap<String, (Axis, i32)>;
+
 /// A zone resolved against an area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolvedZone {
@@ -184,8 +187,8 @@ impl Layout {
         if self.zones.is_empty() && self.gaming_zones.is_empty() {
             return Err(LayoutError::NoZones);
         }
+        let positions = self.guide_positions(area, monitor)?;
         let gaming = self.gaming_rects(area, monitor)?;
-        let positions = Resolver::new(self, area, &gaming)?.resolve_all()?;
         let pos = |referenced_by: String, id: &str, expected: Axis| -> Result<i32, LayoutError> {
             let (axis, value) = *positions
                 .get(id)
@@ -211,6 +214,12 @@ impl Layout {
             })
             .chain(gaming.iter().map(|&rect| Ok(ResolvedZone { rect, disabled: rect.is_empty(), gaming: true })))
             .collect()
+    }
+
+    /// Every guide's axis and position (screen px), built-in ones included.
+    pub fn guide_positions(&self, area: Rect, monitor: Rect) -> Result<GuidePositions, LayoutError> {
+        let gaming = self.gaming_rects(area, monitor)?;
+        Resolver::new(self, area, &gaming)?.resolve_all()
     }
 
     /// Each gaming zone's rectangle (see [`GamingZone::place`]).
@@ -275,7 +284,7 @@ impl<'a> Resolver<'a> {
         Ok(Self { area, builtins, guides, state: HashMap::new(), stack: Vec::new() })
     }
 
-    fn resolve_all(mut self) -> Result<HashMap<String, (Axis, i32)>, LayoutError> {
+    fn resolve_all(mut self) -> Result<GuidePositions, LayoutError> {
         let mut out = self.builtins.clone();
         let ids: Vec<&'a str> = self.guides.keys().copied().collect();
         for id in ids {
@@ -286,12 +295,8 @@ impl<'a> Resolver<'a> {
         Ok(out)
     }
 
-    /// The area's start and end along the axis a guide measures.
     fn span(&self, axis: Axis) -> (i32, i32) {
-        match axis {
-            Axis::Vertical => (self.area.left, self.area.right),
-            Axis::Horizontal => (self.area.top, self.area.bottom),
-        }
+        span(self.area, axis)
     }
 
     /// Position of guide `id`, which must be on `expected` axis.
@@ -331,7 +336,7 @@ impl<'a> Resolver<'a> {
                 if !p.is_finite() {
                     return Err(bad());
                 }
-                start as i64 + round((end - start) as f64 * p / 100.0)
+                percent_of(start, end, *p)
             }
             Anchor::Between { a, b, fraction } => {
                 if !fraction.is_finite() {
@@ -339,7 +344,7 @@ impl<'a> Resolver<'a> {
                 }
                 let a = self.position(a, guide.axis, &me)?;
                 let b = self.position(b, guide.axis, &me)?;
-                a as i64 + round((b - a) as f64 * fraction)
+                between(a, b, *fraction)
             }
             Anchor::Offset { from, px } => self.position(from, guide.axis, &me)? as i64 + *px as i64,
         };
@@ -349,6 +354,24 @@ impl<'a> Resolver<'a> {
         self.state.insert(key, State::Done(value));
         Ok(value)
     }
+}
+
+/// The area's start and end along the axis a guide measures.
+pub fn span(area: Rect, axis: Axis) -> (i32, i32) {
+    match axis {
+        Axis::Vertical => (area.left, area.right),
+        Axis::Horizontal => (area.top, area.bottom),
+    }
+}
+
+/// [`Anchor::Percent`]'s position (before clamping to the area).
+pub(crate) fn percent_of(start: i32, end: i32, percent: f64) -> i64 {
+    start as i64 + round((end - start) as f64 * percent / 100.0)
+}
+
+/// [`Anchor::Between`]'s position.
+pub(crate) fn between(a: i32, b: i32, fraction: f64) -> i64 {
+    a as i64 + round((b - a) as f64 * fraction)
 }
 
 /// Rounds half away from zero, so results don't depend on the sign of the offset.

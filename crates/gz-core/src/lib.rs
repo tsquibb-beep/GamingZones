@@ -4,9 +4,11 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod edit;
 pub mod gaming;
 pub mod geometry;
 pub mod hotkey;
+pub mod ipc;
 pub mod layout;
 pub mod store;
 

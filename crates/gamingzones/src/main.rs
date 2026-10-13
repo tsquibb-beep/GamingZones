@@ -10,10 +10,9 @@ mod drag;
 mod dump;
 mod logger;
 mod overlay;
+mod preview;
 mod snap;
 mod zones;
-
-use std::path::PathBuf;
 
 use gz_win::instance::SingleInstance;
 use gz_win::window::{self, MessageBoxKind};
@@ -40,10 +39,9 @@ fn run() -> i32 {
         Err(e) => return fail(&format!("Could not create the single-instance mutex: {}", e.message())),
     };
 
-    let Some(appdata) = std::env::var_os("APPDATA") else {
+    let Some(config_dir) = gz_core::ipc::config_dir() else {
         return fail("%APPDATA% is not set, so there is nowhere to keep settings.");
     };
-    let config_dir = PathBuf::from(appdata).join("GamingZones");
     if let Err(e) = std::fs::create_dir_all(&config_dir) {
         return fail(&format!("Could not create {}: {e}", config_dir.display()));
     }

@@ -1,16 +1,31 @@
 //! Everything the debug hotkey and the ruler report about a window.
 
 use gz_core::Rect;
-use windows::Win32::Foundation::{POINT, RECT};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassNameW, GetClientRect, GetForegroundWindow, GetWindow, GetWindowRect, IsIconic, IsWindow,
-    IsWindowVisible, IsZoomed, GA_ROOT, GW_OWNER,
+    EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetForegroundWindow, GetWindow, GetWindowRect, IsIconic,
+    IsWindow, IsWindowVisible, IsZoomed, GA_ROOT, GW_OWNER,
 };
 
 use crate::monitor::{self, MonitorInfo};
 use crate::{dpi, from_wide, process, rect_from, window, Hwnd};
+
+/// Every top-level window, front to back.
+pub fn top_level_windows() -> Vec<Hwnd> {
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let list = unsafe { &mut *(lparam.0 as *mut Vec<Hwnd>) };
+        list.extend(Hwnd::from_raw(hwnd));
+        BOOL(1)
+    }
+    let mut list: Vec<Hwnd> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(collect), LPARAM(&mut list as *mut Vec<Hwnd> as isize));
+    }
+    list
+}
 
 pub fn foreground_window() -> Option<Hwnd> {
     Hwnd::from_raw(unsafe { GetForegroundWindow() })

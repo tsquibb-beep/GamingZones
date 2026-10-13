@@ -1,4 +1,4 @@
-// Shared build script for the gamingzones and ruler exes. Generates the Windows resource
+// Shared build script for the gamingzones, ruler and gz-editor exes. Generates the Windows resource
 // script (icon, PMv2 manifest, version info) so the exe's file properties always match
 // version.txt. The icon is res/<package name>.ico.
 use std::{env, fs, path::PathBuf};
@@ -10,6 +10,7 @@ fn main() {
     // What Task Manager shows as the process name.
     let description = match name.as_str() {
         "ruler" => "GamingZones Ruler",
+        "gz-editor" => "GamingZones Editor",
         _ => "GamingZones",
     };
     let version = fs::read_to_string(root.join("version.txt")).unwrap();

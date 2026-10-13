@@ -84,6 +84,17 @@ impl Overlay {
         }
     }
 
+    /// Replaces the zones (same area), for the editor's live preview.
+    pub fn set_zones(&self, zones: Vec<ResolvedZone>) {
+        let mut view = self.view.borrow_mut();
+        if view.zones != zones {
+            view.zones = zones;
+            view.make_font();
+            drop(view);
+            window::invalidate(self.hwnd);
+        }
+    }
+
     pub fn set_selected(&self, selected: &[usize]) {
         let mut view = self.view.borrow_mut();
         if view.selected != selected {

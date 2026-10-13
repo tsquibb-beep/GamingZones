@@ -50,3 +50,21 @@ Borderless Gaming (GPL-2.0) is used as a behavioural reference only. No code is 
 | `log` | MIT or Apache-2.0 |
 
 `embed-resource` is used at build time only and is not linked into the executables.
+
+### Layout editor (`gz-editor.exe` only)
+
+The editor is built with [egui/eframe](https://github.com/emilk/egui) (MIT or Apache-2.0) and its dependencies
+(`winit`, `glutin`, `glow`, `epaint`, `skrifa`, `image`, `arboard` and others). Every crate in its dependency tree is
+under a permissive licence compatible with the GPL-3.0: MIT, Apache-2.0, Zlib, BSD-2/3-Clause, ISC, BSL-1.0, 0BSD or
+Unlicense (`cargo tree -p gz-editor --format "{p} {l}"` lists them).
+
+It embeds egui's default fonts (crate `epaint_default_fonts`), each under its own licence:
+
+| Font | Licence |
+|---|---|
+| Ubuntu Light | Ubuntu Font Licence 1.0 |
+| Hack | MIT, with the Bitstream Vera licence for the glyphs it derives from |
+| Noto Emoji | SIL Open Font License 1.1 |
+| emoji-icon-font | MIT |
+
+None of this is linked into the always-running `gamingzones.exe`.

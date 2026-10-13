@@ -11,6 +11,7 @@ pub mod hotkey;
 pub mod input;
 pub mod inspect;
 pub mod instance;
+pub mod ipc;
 pub mod keyhook;
 pub mod monitor;
 pub mod paint;

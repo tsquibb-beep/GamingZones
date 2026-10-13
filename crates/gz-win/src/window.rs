@@ -26,6 +26,11 @@ impl Hwnd {
     pub(crate) fn from_raw(h: HWND) -> Option<Hwnd> {
         (!h.is_invalid()).then_some(Hwnd(h.0 as isize))
     }
+
+    /// The handle as a number, to pass in a message parameter.
+    pub fn as_isize(self) -> isize {
+        self.0
+    }
 }
 
 impl fmt::Display for Hwnd {
@@ -78,6 +83,7 @@ pub mod msg {
     pub const ERASEBKGND: u32 = wm::WM_ERASEBKGND;
     pub const NCHITTEST: u32 = wm::WM_NCHITTEST;
     pub const MOUSEACTIVATE: u32 = wm::WM_MOUSEACTIVATE;
+    pub const COPYDATA: u32 = wm::WM_COPYDATA;
     /// `WM_NCHITTEST` result: let clicks fall through to the window below.
     pub const HTTRANSPARENT: isize = wm::HTTRANSPARENT as isize;
     /// `WM_MOUSEACTIVATE` result: don't activate.
@@ -341,6 +347,16 @@ pub fn show_below(hwnd: Hwnd, above: Hwnd, rect: Rect) -> crate::Result<()> {
             rect.height(),
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )
+    }
+}
+
+/// Brings a window to the front (restoring it if minimised).
+pub fn activate(hwnd: Hwnd) {
+    unsafe {
+        if IsIconic(hwnd.raw()).as_bool() {
+            let _ = ShowWindow(hwnd.raw(), SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd.raw());
     }
 }
 

@@ -1,7 +1,18 @@
 [package]
 name = "gz-editor"
-description = "GamingZones layout editor and settings (Phase 3; placeholder for now)"
+description = "GamingZones layout editor (launched on demand from the tray)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+build = "../../res/build.rs"
+
+[dependencies]
+gz-core.workspace = true
+gz-win.workspace = true
+serde_json.workspace = true
+# OpenGL backend only (no wgpu), no accesskit: keeps the editor small. egui stays out of the core binary.
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+
+[build-dependencies]
+embed-resource.workspace = true

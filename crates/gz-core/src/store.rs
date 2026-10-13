@@ -62,6 +62,53 @@ impl LayoutsFile {
         self.layouts.iter().find(|l| l.id == id)
     }
 
+    /// An id for a new layout called `name`: the name in lower case with dashes, made unique.
+    pub fn unique_id(&self, name: &str) -> String {
+        let mut slug = String::new();
+        for c in name.trim().chars().flat_map(char::to_lowercase) {
+            if c.is_ascii_alphanumeric() {
+                slug.push(c);
+            } else if !slug.is_empty() && !slug.ends_with('-') {
+                slug.push('-');
+            }
+        }
+        let slug = match slug.trim_end_matches('-') {
+            "" => "layout".to_string(),
+            s => s.to_string(),
+        };
+        std::iter::once(slug.clone())
+            .chain((2..).map(|n| format!("{slug}-{n}")))
+            .find(|id| self.get(id).is_none())
+            .expect("unbounded")
+    }
+
+    /// The file as the editor writes it: one line per gaming zone, guide and zone, in the
+    /// same style as the built-in file, so it stays easy to edit by hand.
+    pub fn to_json(&self) -> String {
+        let mut out = String::from("{\n  \"layouts\": [\n");
+        for (n, l) in self.layouts.iter().enumerate() {
+            let mut fields = vec![format!("\"id\": {}", inline(&l.id)), format!("\"name\": {}", inline(&l.name))];
+            if l.gaming_over_taskbar {
+                fields.push("\"gaming_over_taskbar\": true".into());
+            }
+            if !l.gaming_zones.is_empty() {
+                fields.push(format!("\"gaming_zones\": {}", lines(&l.gaming_zones)));
+            }
+            fields.push(format!("\"guides\": {}", lines(&l.guides)));
+            fields.push(format!("\"zones\": {}", lines(&l.zones)));
+            out += "    {\n      ";
+            out += &fields.join(",\n      ");
+            out += if n + 1 == self.layouts.len() { "\n    }\n" } else { "\n    },\n" };
+        }
+        out + "  ]\n}\n"
+    }
+
+    /// Writes [`Self::to_json`] to `path` via a temporary file, so a failed write can't
+    /// leave a half-written file behind.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        save_atomically(path, &self.to_json())
+    }
+
     /// Loads `path`, or writes the built-in layouts there if it doesn't exist.
     pub fn load_or_create(path: &Path) -> Result<(LayoutsFile, bool), LayoutsError> {
         match std::fs::read_to_string(path) {
@@ -73,6 +120,69 @@ impl LayoutsFile {
             Err(e) => Err(LayoutsError::Config(ConfigError::Io(e))),
         }
     }
+}
+
+/// A value on one line, with a space after `:` and `,` and inside braces (`{ "px": 100 }`),
+/// and whole numbers without `.0`.
+fn inline<T: Serialize + ?Sized>(value: &T) -> String {
+    let compact = serde_json::to_string(value).expect("layouts always serialise");
+    let mut out = String::with_capacity(compact.len() * 5 / 4);
+    let (mut in_string, mut escaped) = (false, false);
+    let mut chars = compact.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            ':' | ',' => {
+                out.push(c);
+                out.push(' ');
+            }
+            '{' if chars.peek() != Some(&'}') => out.push_str("{ "),
+            '}' if !out.ends_with('{') => out.push_str(" }"),
+            '.' if chars.peek() == Some(&'0') => {
+                // "21.0" → "21", but keep "0.05".
+                let mut ahead = chars.clone();
+                ahead.next();
+                if ahead.peek().is_some_and(|n| !n.is_ascii_digit()) {
+                    chars.next();
+                } else {
+                    out.push(c);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// A JSON array with one [`inline`] item per line (or `[]`).
+fn lines<T: Serialize>(items: &[T]) -> String {
+    if items.is_empty() {
+        return "[]".into();
+    }
+    let rows: Vec<String> = items.iter().map(|i| format!("        {}", inline(i))).collect();
+    format!("[\n{}\n      ]", rows.join(",\n"))
+}
+
+fn save_atomically(path: &Path, text: &str) -> Result<(), ConfigError> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(ConfigError::Io)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        ConfigError::Io(e)
+    })
 }
 
 /// One monitor's entry in `applied.json`.
@@ -113,7 +223,7 @@ impl Applied {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        std::fs::write(path, self.to_json()).map_err(ConfigError::Io)
+        save_atomically(path, &self.to_json())
     }
 
     /// The layout id for a monitor (`None` = no zones there).
@@ -214,6 +324,28 @@ mod tests {
         // 26% = 1597.44 → 1597, 74% = 4546.56 → 4547.
         assert_eq!(r, [Rect::new(0, 0, 1597, 2500), Rect::new(1597, 0, 4547, 2500), Rect::new(4547, 0, 6144, 2500)]);
         assert_tiles(&r, WORK);
+    }
+
+    #[test]
+    fn written_like_the_built_in_file() {
+        assert_eq!(LayoutsFile::defaults().to_json(), DEFAULT_LAYOUTS_JSON);
+        // Odd strings and numbers survive.
+        let mut file = LayoutsFile::defaults();
+        file.layouts[0].name = "Quote \" comma, {brace}: 1.0".into();
+        file.layouts[0].gaming_over_taskbar = true;
+        file.layouts[1].guides[0].anchor = crate::layout::Anchor::Percent(0.05);
+        let again = LayoutsFile::from_json(&file.to_json()).unwrap();
+        assert_eq!(again, file);
+        assert!(file.to_json().contains("{ \"percent\": 0.05 }"));
+    }
+
+    #[test]
+    fn unique_ids() {
+        let file = LayoutsFile::defaults();
+        assert_eq!(file.unique_id("My Layout!"), "my-layout");
+        assert_eq!(file.unique_id("WFH"), "wfh-2");
+        assert_eq!(file.unique_id("  ***  "), "layout");
+        assert_eq!(file.unique_id("Ünïcode 2"), "n-code-2");
     }
 
     #[test]

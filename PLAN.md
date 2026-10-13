@@ -211,7 +211,7 @@ seen; the notice is shown when the drag starts, once per window (as FancyZones),
 
 **Field-verified by Tom (2026-10-13), all 14 checks, including a real game (the hotkey with borderless windowed works well).**
 Open question: `gaming_over_taskbar` places the zone correctly, but the taskbar is topmost and stays drawn over the
-overlapping part of the window; see Tom's decision on a "keep on top" option. Details:
+overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Details:
 - JSON: `"gaming_zones": [ { "size": { "pixels": { "w", "h" } } | { "aspect": { "ratio_w", "ratio_h", "k" } } |
   { "integer_scale": { "base_w", "base_h", "scale" } }, "x": px | "centre", "y": px | "centre" } ]`, plus
   `"gaming_over_taskbar": true`. `"centre"` (the default) keeps a shipped layout centred on any monitor.
@@ -227,28 +227,45 @@ overlapping part of the window; see Tom's decision on a "keep on top" option. De
   window is restored first.
 
 ### Phase 3 — Layout editor (`gz-editor.exe`)
-- [ ] Layout list with preview cards, like FancyZones: create, duplicate, rename, delete; launched from the tray.
-- [ ] Canvas showing a scaled preview of the selected monitor's area:
+- [x] Layout list with preview cards, like FancyZones: create, duplicate, rename, delete; launched from the tray.
+- [x] Canvas showing a scaled preview of the selected monitor's area:
   - click a zone to split it (Shift toggles horizontal/vertical);
   - drag dividers;
   - select a divider and type its position in px or %;
   - select adjacent zones and merge them;
   - delete zones.
-- [ ] Gaming zone panel:
+- [x] Gaming zone panel:
   - on/off;
   - size mode (Pixels / Aspect + scale / Integer scale of a base), with presets (1280×720, 1600×900, 1920×1080, 2560×1440, 3840×2160, 4:3, 16:10, 21:9) and an exact W×H readout;
   - X/Y inputs; drag the body or its edges to move it (edges move, never resize); align buttons (centre, left, right, top, bottom);
   - "Capture size from window": pick from a list of open top-level windows and read their client size;
   - "extend over taskbar" tick box.
-- [ ] Live deadzone preview against the current threshold.
-- [ ] "Preview on screen": the core shows the real overlay for the layout being edited.
-- [ ] Save writes JSON and posts the reload message; the editor process exits fully on close.
+- [x] Live deadzone preview against the current threshold.
+- [x] "Preview on screen": the core shows the real overlay for the layout being edited.
+- [x] Save writes JSON and posts the reload message; the editor process exits fully on close.
 
 **Done when**
 - Tom recreates all four reference layouts in the editor.
 - Their JSON resolves to the same rects as the hand-written versions.
 - Moving the gaming zone in the editor visibly reflows the neighbours.
 - The core's memory is unchanged after the editor closes.
+
+**Built (2026-10-14), awaiting Tom's manual test.** Details:
+- Editing logic is in gz-core `edit.rs` (unit-tested; one test rebuilds Split focus click by click and gets the
+  built-in rects). A split adds a guide *between* the zone's sides at the shortest decimal that lands on the clicked
+  pixel; dragging a divider keeps its anchor kind (px / % / split / offset); "Make it fixed px / % of the area"
+  converts in place. Merge takes every zone inside the selection's bounding box and refuses if they don't tile it.
+- Also added: undo/redo (Ctrl+Z / Ctrl+Y), "Use on this monitor" (writes applied.json), Ctrl+S, a warning when the
+  files changed on disk since the editor opened, and a save prompt on close.
+- Turning the gaming zone off turns the edges other zones used into % guides, so nothing else moves on this monitor.
+  Turning it on in a fresh layout arranges zones around it; otherwise "Arrange zones around it" does that.
+- Preview on screen: the editor sends the layout as JSON in `WM_COPYDATA` (gz-core `ipc.rs`); the tray app shows the
+  overlay under the editor window and removes it when told, or when a WinEvent hook sees the editor window close.
+  The tray app allows WM_COPYDATA and the reload message through UIPI, so a non-elevated editor still reaches an
+  elevated tray app.
+- `layouts.json` is written one line per zone/guide (same style as the built-in file), via a temp file + rename.
+- gz-editor uses eframe 0.36 with the glow (OpenGL) backend only: 6.2 MB exe, ~140 MB while open (mostly the GL
+  driver). The tray app's memory was 1.67 MB before and after the editor ran.
 
 ### Phase 4 — Layout selector, shortcuts, settings
 - [ ] Layout selector popup:
@@ -285,6 +302,10 @@ overlapping part of the window; see Tom's decision on a "keep on top" option. De
   - Optional per-exe slow re-check fallback (off by default).
   - Remove the hooks on `EVENT_OBJECT_DESTROY` or toggle-on.
 - [ ] Written from the Win32 docs. Borderless Gaming is a behavioural reference only (GPL-2.0; do not copy code).
+- [ ] "Keep on top" (opt-in, agreed 2026-10-13): a window snapped to a gaming zone with `gaming_over_taskbar` is made
+  topmost so it covers the taskbar (the taskbar is itself topmost, so placement alone leaves it drawn over the game).
+  Cleared when the window is snapped elsewhere or by the toggle hotkey. First check whether Win / clicking the taskbar
+  still brings the taskbar back over it.
 
 **Done when**
 - Toggling 10× on the ruler and on two real games causes no position or size drift.

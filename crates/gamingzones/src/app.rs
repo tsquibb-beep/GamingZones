@@ -9,15 +9,17 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gz_core::config::{LoadOutcome, SETTINGS_FILE};
+use gz_core::ipc::{self, MAIN_WINDOW_CLASS, RELOAD_MESSAGE};
 use gz_core::{Hotkey, Settings};
 use gz_win::keyhook::KeyboardHook;
 use gz_win::monitor::{self, MonitorIds};
 use gz_win::tray::{self, MenuItem, TrayIcon};
 use gz_win::window::{self, msg, Background, Message, WindowHandler, WindowSpec};
 use gz_win::winevent::{self, event, Delivery, Filter, WinEventHook};
-use gz_win::{hotkey, input, inspect, process, styles::ws, Hwnd};
+use gz_win::{hotkey, input, inspect, ipc as win_ipc, process, styles::ws, Hwnd};
 
 use crate::drag::{Drag, DragMessages, DropTarget};
+use crate::preview::Preview;
 use crate::snap::Picked;
 use crate::zones::{MonitorZones, ZoneConfig};
 use crate::{dump, logger, snap};
@@ -31,6 +33,8 @@ const WM_DRAG_LOCATION: u32 = msg::APP + 3;
 const WM_DRAG_DESTROY: u32 = msg::APP + 4;
 /// From the drag's keyboard hook: wParam = virtual key, lParam = 1 down / 0 up.
 const WM_DRAG_KEY: u32 = msg::APP + 5;
+/// The editor's window (showing a preview) was destroyed.
+const WM_PREVIEW_CLOSED: u32 = msg::APP + 6;
 
 const DRAG_MESSAGES: DragMessages =
     DragMessages { location: WM_DRAG_LOCATION, destroy: WM_DRAG_DESTROY, key: WM_DRAG_KEY };
@@ -43,9 +47,6 @@ const CMD_EXIT: u32 = 4;
 /// Hotkey ids (`WM_HOTKEY` wParam).
 const HOTKEY_DEBUG_DUMP: i32 = 1;
 const HOTKEY_GAMING_SNAP: i32 = 2;
-
-/// Posted by the editor (Phase 3) after it saves, and usable by anything else.
-pub const RELOAD_MESSAGE: &str = "GamingZones.Reload";
 
 pub struct App {
     config_dir: PathBuf,
@@ -60,6 +61,8 @@ pub struct App {
     drag: Option<Drag>,
     /// Windows we've already shown a "can't snap this" notice for.
     warned: HashSet<Hwnd>,
+    /// The editor's "Preview on screen".
+    preview: Option<Preview>,
 }
 
 /// Creates the hidden window; the app lives in its handler until the window is destroyed.
@@ -76,11 +79,12 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
         movesize_hook: None,
         drag: None,
         warned: HashSet::new(),
+        preview: None,
     };
     // A hidden top-level window rather than a message-only one: only top-level windows get
     // the TaskbarCreated and WM_DISPLAYCHANGE broadcasts.
     let spec = WindowSpec {
-        class: "GamingZones.Main",
+        class: MAIN_WINDOW_CLASS,
         title: "GamingZones",
         style: ws::POPUP,
         ex_style: ws::EX_TOOLWINDOW,
@@ -94,6 +98,12 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
 impl App {
     fn on_create(&mut self, hwnd: Hwnd) {
         dump::log_self(hwnd);
+        // If we run elevated, the (possibly non-elevated) editor must still reach us.
+        for m in [self.reload_msg, msg::COPYDATA] {
+            if let Err(e) = win_ipc::allow_message(hwnd, m) {
+                log::warn!("Could not allow message {m:#X} from other processes: {}", e.message());
+            }
+        }
         match TrayIcon::add(hwnd, WM_TRAY, "GamingZones") {
             Ok(tray) => self.tray = Some(tray),
             Err(e) => log::error!("Could not add the tray icon: {}", e.message()),
@@ -193,7 +203,7 @@ impl App {
     fn show_menu(&mut self, hwnd: Hwnd) {
         let items = [
             MenuItem::Item { id: CMD_RELOAD, label: "&Reload config", enabled: true },
-            MenuItem::Item { id: CMD_EDITOR, label: "Open &editor", enabled: false },
+            MenuItem::Item { id: CMD_EDITOR, label: "Open &editor", enabled: true },
             MenuItem::Item { id: CMD_SETTINGS, label: "&Settings", enabled: false },
             MenuItem::Separator,
             MenuItem::Item { id: CMD_EXIT, label: "E&xit", enabled: true },
@@ -203,10 +213,57 @@ impl App {
                 log::info!("Reload requested from the tray menu");
                 self.reload(hwnd);
             }
+            Some(CMD_EDITOR) => self.open_editor(),
             Some(CMD_EXIT) => {
                 // Posted, not DestroyWindow here: WM_DESTROY must reach `handle` (see
                 // WindowHandler's re-entrancy note).
                 let _ = window::post_message(hwnd, msg::CLOSE, 0, 0);
+            }
+            _ => {}
+        }
+    }
+
+    /// Starts gz-editor.exe from our own folder. It's a separate process, so nothing of
+    /// it stays in ours once it exits; it keeps itself to one instance.
+    fn open_editor(&self) {
+        let path = std::env::current_exe().unwrap_or_default().with_file_name("gz-editor.exe");
+        match std::process::Command::new(&path).spawn() {
+            Ok(child) => log::info!("Started the editor (pid {})", child.id()),
+            Err(e) => {
+                log::error!("Could not start {}: {e}", path.display());
+                self.notify("Couldn't open the editor", &format!("{}: {e}", path.display()));
+            }
+        }
+    }
+
+    /// `WM_COPYDATA` from the editor: show, update or hide the preview.
+    fn on_copy_data(&mut self, hwnd: Hwnd, m: &Message) {
+        let Some((kind, bytes, sender)) = win_ipc::received_data(m) else { return };
+        match kind {
+            ipc::PREVIEW_SHOW => {
+                let Some(editor) = sender else { return };
+                let p: ipc::Preview = match serde_json::from_slice(&bytes) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("Preview: bad data from the editor: {e}");
+                        return;
+                    }
+                };
+                if self.preview.as_ref().is_none_or(|p| p.editor != editor) {
+                    log::debug!("Preview: showing for editor window {editor}");
+                    self.preview = Some(Preview::new(hwnd, editor, WM_PREVIEW_CLOSED));
+                    if self.drag.is_some() {
+                        self.preview.as_mut().expect("just set").suspend();
+                    }
+                }
+                let preview = self.preview.as_mut().expect("set above");
+                if let Err(e) = preview.update(&p, &self.settings) {
+                    log::warn!("Preview: {e}");
+                }
+            }
+            ipc::PREVIEW_HIDE => {
+                let had = self.preview.take().is_some();
+                log::debug!("Preview: hidden{}", if had { "" } else { " (wasn't showing)" });
             }
             _ => {}
         }
@@ -249,6 +306,9 @@ impl App {
             }
             return;
         }
+        if let Some(p) = &mut self.preview {
+            p.suspend();
+        }
         let drag = Drag::start(hwnd, window, target.exe, &DRAG_MESSAGES);
         log::debug!(
             "Drag of {} ({window}) started; hooks: {} WinEvent, keyboard {}",
@@ -273,6 +333,9 @@ impl App {
         let drag = self.drag.take().expect("checked above");
         let exe = drag.exe.clone();
         let target = drag.finish(); // hooks and overlay are gone after this
+        if let Some(p) = &mut self.preview {
+            p.resume();
+        }
         log::debug!(
             "Drag of {exe} ended; hooks left: {} WinEvent (1 = the move/size hook), keyboard {}",
             WinEventHook::live_count(),
@@ -361,6 +424,7 @@ impl App {
 
     fn on_destroy(&mut self, hwnd: Hwnd) {
         self.drag = None;
+        self.preview = None;
         self.movesize_hook = None;
         for id in self.registered.drain(..) {
             let _ = hotkey::unregister(hwnd, id);
@@ -397,6 +461,17 @@ impl WindowHandler for App {
                     drag.on_key(m.wparam as u16, m.lparam != 0);
                 }
                 self.update_drag();
+            }
+            msg::COPYDATA => {
+                self.on_copy_data(hwnd, m);
+                return Some(1);
+            }
+            WM_PREVIEW_CLOSED => {
+                let window = winevent::message_window(m.lparam);
+                if self.preview.as_ref().is_some_and(|p| Some(p.editor) == window) {
+                    log::debug!("Preview: the editor closed");
+                    self.preview = None;
+                }
             }
             WM_DRAG_DESTROY => {
                 let window = winevent::message_window(m.lparam);
