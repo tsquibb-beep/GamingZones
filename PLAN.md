@@ -98,7 +98,7 @@ Zone { id, left, right, top, bottom }            // guide ids
   - Setting for when the client size differs from the zone: **Resize to fit** (default) or **Centre without resizing**.
 - **Overlapping zones**: the smallest zone under the cursor wins (setting can offer other rules later).
 - **Ctrl-span**: while Shift-dragging, hold Ctrl and move across zones. As in FancyZones, the selection is every zone inside the bounding rectangle of the zone where Ctrl was pressed and the zone under the cursor (a range, not a cumulative add). The window snaps to the bounding rectangle of the selection.
-- **No edge spanning**: dropping on a shared border picks one zone (the overlap rule), not both.
+- **Edge spanning** (optional, off by default): with it on, dropping within `edge_span_radius_px` of a border shared by two zones snaps to both, as FancyZones does. Off, the overlap rule picks one zone.
 - **Skip**: tool windows, popups without a caption, cloaked windows, minimised windows, windows of excluded exes (settings list), and the app's own windows.
 - **Maximised windows**: restore them before snapping.
 - **Elevated windows**: if the target belongs to an elevated process and we are not elevated, show a tray balloon/toast once per window and do nothing.
@@ -160,7 +160,7 @@ Each phase ends with: `cargo build --release`, `cargo test`, `cargo clippy -- -D
 > 2. Ctrl-span: FancyZones' range from the anchor zone to the current zone.
 > 3. Overlay: one constant opacity (`SetLayeredWindowAttributes`), painted normally; no per-pixel alpha bitmap.
 > 4. Overlay z-order: directly under the dragged window, as FancyZones does.
-> 5. Edge spanning: not wanted.
+> 5. Edge spanning: an optional setting, off by default (`settings.json` in Phase 1, settings UI in Phase 4).
 >
 > Also: skip resizes (MOVESIZESTART fires for them too; FancyZones checks for a resize cursor), and
 > skip snapping if the window is maximised at drag end (Aero Snap / browser tab merge).
