@@ -48,6 +48,24 @@
         { "left": "left-col", "right": "right-col", "top": "area.top", "bottom": "area.bottom" },
         { "left": "right-col", "right": "area.right", "top": "area.top", "bottom": "area.bottom" }
       ]
+    },
+    {
+      "id": "gaming-focus",
+      "name": "Gaming-Focus",
+      "gaming_zones": [
+        { "size": { "pixels": { "w": 3840, "h": 2160 } }, "x": "centre", "y": "centre" }
+      ],
+      "guides": [
+        { "id": "side-split", "axis": "horizontal", "anchor": { "percent": 50 } }
+      ],
+      "zones": [
+        { "left": "area.left", "right": "gz0.left", "top": "area.top", "bottom": "side-split" },
+        { "left": "area.left", "right": "gz0.left", "top": "side-split", "bottom": "area.bottom" },
+        { "left": "gz0.left", "right": "gz0.right", "top": "area.top", "bottom": "gz0.top" },
+        { "left": "gz0.left", "right": "gz0.right", "top": "gz0.bottom", "bottom": "area.bottom" },
+        { "left": "gz0.right", "right": "area.right", "top": "area.top", "bottom": "side-split" },
+        { "left": "gz0.right", "right": "area.right", "top": "side-split", "bottom": "area.bottom" }
+      ]
     }
   ]
 }

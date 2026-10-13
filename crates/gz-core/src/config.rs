@@ -37,12 +37,34 @@ pub struct Snapping {
     pub edge_span_radius_px: i32,
     /// Exe file names (e.g. `"game.exe"`, any case) whose windows are never snapped.
     pub excluded_apps: Vec<String>,
+    /// Zones narrower or shorter than this are disabled: shown greyed (or hidden) and never
+    /// snapped to. Typically the strips left around a large gaming zone.
+    pub deadzone_px: i32,
+    /// What a window snapped to the gaming zone does when its client size differs from the zone.
+    pub gaming_fit: GamingFit,
 }
 
 impl Default for Snapping {
     fn default() -> Self {
-        Self { edge_span: false, edge_span_radius_px: 20, excluded_apps: Vec::new() }
+        Self {
+            edge_span: false,
+            edge_span_radius_px: 20,
+            excluded_apps: Vec::new(),
+            deadzone_px: 400,
+            gaming_fit: GamingFit::Resize,
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GamingFit {
+    /// Resize the window so its client area is exactly the gaming zone.
+    #[default]
+    Resize,
+    /// Keep the client size and centre it in the gaming zone.
+    #[serde(alias = "center")]
+    Centre,
 }
 
 impl Snapping {
@@ -67,6 +89,17 @@ pub struct Overlay {
     pub show_numbers: bool,
     /// 0-100 %.
     pub opacity: u8,
+    /// Zones below `snapping.deadzone_px`: drawn in `disabled_color`, or not drawn at all.
+    pub disabled_zones: DisabledZones,
+    pub disabled_color: Color,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisabledZones {
+    #[default]
+    Greyed,
+    Hidden,
 }
 
 impl Default for Overlay {
@@ -78,6 +111,8 @@ impl Default for Overlay {
             number_color: Color::rgb(0x00, 0x00, 0x00),
             show_numbers: true,
             opacity: 50,
+            disabled_zones: DisabledZones::Greyed,
+            disabled_color: Color::rgb(0x80, 0x80, 0x80),
         }
     }
 }
@@ -128,11 +163,14 @@ impl From<Color> for String {
 pub struct Hotkeys {
     /// Logs geometry and process details of the foreground window.
     pub debug_dump: Option<Hotkey>,
+    /// Snaps the foreground window to the gaming zone (no drag needed, so it works for
+    /// borderless and fixed-size game windows).
+    pub gaming_snap: Option<Hotkey>,
 }
 
 impl Default for Hotkeys {
     fn default() -> Self {
-        Self { debug_dump: Some(builtin("Win+Ctrl+Alt+I")) }
+        Self { debug_dump: Some(builtin("Win+Ctrl+Alt+I")), gaming_snap: Some(builtin("Win+Ctrl+Alt+G")) }
     }
 }
 
@@ -222,6 +260,19 @@ mod tests {
         let s = Settings::default();
         assert_eq!(Settings::from_json(&s.to_json()).unwrap(), s);
         assert_eq!(s.hotkeys.debug_dump.unwrap().to_string(), "Win+Ctrl+Alt+I");
+        assert_eq!(s.hotkeys.gaming_snap.unwrap().to_string(), "Win+Ctrl+Alt+G");
+    }
+
+    #[test]
+    fn gaming_settings() {
+        let s = Settings::from_json(
+            r#"{ "snapping": { "gaming_fit": "center", "deadzone_px": 250 }, "overlay": { "disabled_zones": "hidden" } }"#,
+        )
+        .unwrap();
+        assert_eq!((s.snapping.gaming_fit, s.snapping.deadzone_px), (GamingFit::Centre, 250));
+        assert_eq!(s.overlay.disabled_zones, DisabledZones::Hidden);
+        assert!(s.to_json().contains(r#""gaming_fit": "centre""#));
+        assert!(Settings::from_json(r#"{ "snapping": { "gaming_fit": "stretch" } }"#).is_err());
     }
 
     #[test]

@@ -350,11 +350,11 @@ pub fn hide(hwnd: Hwnd) {
     }
 }
 
-/// Restores a maximised or minimised window (another app's window: asynchronous, so a hung
-/// app can't block us).
+/// Restores a maximised or minimised window, waiting until it's done (so the window can be
+/// measured and moved straight after).
 pub fn restore(hwnd: Hwnd) {
     unsafe {
-        let _ = ShowWindowAsync(hwnd.raw(), SW_RESTORE);
+        let _ = ShowWindow(hwnd.raw(), SW_RESTORE);
     }
 }
 

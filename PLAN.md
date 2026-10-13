@@ -75,7 +75,7 @@ GamingZone {
   size: Pixels { w, h }
       | Aspect { ratio_w, ratio_h, k }          // size = k*(rw/g) x k*(rh/g), g = gcd → always exact
       | IntegerScale { base_w, base_h, scale },
-  x, y,                                          // top-left, px, relative to layout area
+  x, y,                                          // top-left: px relative to layout area, or "centre"
 }
 
 Guide { id, axis: Vertical|Horizontal, anchor }
@@ -196,11 +196,11 @@ Admin windows: while one is in front Windows hides key presses from a non-admin 
 seen; the notice is shown when the drag starts, once per window (as FancyZones), and no drag hooks are set up.
 
 ### Phase 2 — Gaming zone
-- [ ] gz-core: `GamingZone`, `gz*` built-in guides, aspect and integer-scale maths with unit tests, clamping, `gaming_over_taskbar`.
-- [ ] Add Gaming-Focus to `layouts.json`.
-- [ ] Client-area snapping for the gaming zone; "resize to fit / centre" setting.
-- [ ] Deadzone threshold setting (default 400 px). Disabled zones are drawn greyed in the overlay (setting: greyed or hidden) and are never snap targets.
-- [ ] Hotkey to snap the active window to the gaming zone (default `Win+Ctrl+Alt+G`), so borderless or fixed windows can be placed without dragging.
+- [x] gz-core: `GamingZone`, `gz*` built-in guides, aspect and integer-scale maths with unit tests, clamping, `gaming_over_taskbar`.
+- [x] Add Gaming-Focus to `layouts.json`.
+- [x] Client-area snapping for the gaming zone; "resize to fit / centre" setting.
+- [x] Deadzone threshold setting (default 400 px). Disabled zones are drawn greyed in the overlay (setting: greyed or hidden) and are never snap targets.
+- [x] Hotkey to snap the active window to the gaming zone (default `Win+Ctrl+Alt+G`), so borderless or fixed windows can be placed without dragging.
 
 **Done when**
 - Ruler at 1920×1080 snapped to a 1920×1080 gaming zone has client rect == zone rect exactly.
@@ -208,6 +208,21 @@ seen; the notice is shown when the drag starts, once per window (as FancyZones),
 - A zone pushed below the threshold is greyed and can't be snapped to.
 - With `gaming_over_taskbar`, a gaming zone taller than the work area is placed correctly.
 - Tested with at least one real windowed game.
+
+**Built (2026-10-13), awaiting Tom's manual test.** Details:
+- JSON: `"gaming_zones": [ { "size": { "pixels": { "w", "h" } } | { "aspect": { "ratio_w", "ratio_h", "k" } } |
+  { "integer_scale": { "base_w", "base_h", "scale" } }, "x": px | "centre", "y": px | "centre" } ]`, plus
+  `"gaming_over_taskbar": true`. `"centre"` (the default) keeps a shipped layout centred on any monitor.
+- A gaming zone bigger than the space it's allowed is shrunk to fit (and the log says so); sizes over 16384 px are rejected.
+- The gaming zone comes after the numbered zones and is labelled `G`. Snapped to on its own it fits the client area;
+  as part of a Ctrl-span or edge span it counts as a normal zone (the frame fills the bounding rectangle).
+- Gaming-Focus is last in the built-in layouts, so new monitors still default to Split focus. An existing
+  `layouts.json` isn't changed (Tom's was identical to the old defaults, so it was replaced).
+- Settings: `snapping.deadzone_px` (400), `snapping.gaming_fit` (`resize` / `centre`), `overlay.disabled_zones`
+  (`greyed` / `hidden`), `overlay.disabled_color`, `hotkeys.gaming_snap`.
+- Hotkey: the foreground window goes to the gaming zone on its own monitor, or on the first monitor (primary first)
+  whose layout has one. Popups (borderless games) and owned windows are allowed here, unlike drags. A maximised
+  window is restored first.
 
 ### Phase 3 — Layout editor (`gz-editor.exe`)
 - [ ] Layout list with preview cards, like FancyZones: create, duplicate, rename, delete; launched from the tray.

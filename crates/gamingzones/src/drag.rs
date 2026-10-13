@@ -7,7 +7,7 @@
 //! - the zone overlay window.
 
 use gz_core::config::Settings;
-use gz_core::layout::{self, zone_range, zones_at};
+use gz_core::layout::{self, zone_label, zone_range, zones_at};
 use gz_core::Rect;
 use gz_win::keyhook::{vk, KeyboardHook};
 use gz_win::monitor::{self, MonitorIds};
@@ -22,6 +22,15 @@ pub struct DragMessages {
     pub location: u32,
     pub destroy: u32,
     pub key: u32,
+}
+
+/// Where to snap the window when the drag ends.
+pub struct DropTarget {
+    pub rect: Rect,
+    /// The zones, for the log: `4`, `4+5`, `G`.
+    pub label: String,
+    /// The gaming zone on its own: fit the client area, not the frame.
+    pub gaming: bool,
 }
 
 pub struct Drag {
@@ -145,7 +154,7 @@ impl Drag {
         if device != self.monitor_device {
             self.monitor_device = device;
             let ids = self.ids.get_or_insert_with(MonitorIds::query);
-            self.monitor = monitor.and_then(|m| zones.for_monitor(&m, ids));
+            self.monitor = monitor.and_then(|m| zones.for_monitor(&m, ids, settings.snapping.deadzone_px));
             self.overlay = None;
             self.anchor.clear();
             self.selected.clear();
@@ -169,7 +178,7 @@ impl Drag {
         };
 
         if self.overlay.is_none() {
-            match Overlay::create(mz.work, mz.zones.clone(), mz.dpi, &settings.overlay) {
+            match Overlay::create(mz.overlay_area(), mz.zones.clone(), mz.dpi, &settings.overlay) {
                 Ok(o) => {
                     log::debug!("Drag: overlay created on {} at {}", mz.device, o.area());
                     self.overlay = Some(o);
@@ -193,17 +202,18 @@ impl Drag {
         self.selected.clear();
     }
 
-    /// Ends the drag and returns where to snap: the selected zones' bounding rectangle and
-    /// their numbers (1-based, for the log). Hooks and overlay are removed (by dropping
-    /// `self`) before the caller moves any window, so a slow app can't hold up keyboard
-    /// input through our keyboard hook.
-    pub fn finish(self) -> Option<(Rect, Vec<usize>)> {
+    /// Ends the drag and returns where to snap: the selected zones' bounding rectangle.
+    /// Hooks and overlay are removed (by dropping `self`) before the caller moves any
+    /// window, so a slow app can't hold up keyboard input through our keyboard hook.
+    pub fn finish(self) -> Option<DropTarget> {
         if self.cancelled || !self.shift() || self.selected.is_empty() {
             return None;
         }
         let mz = self.monitor.as_ref()?;
         let rect = layout::bounding_rect(&mz.zones, &self.selected)?;
-        Some((rect, self.selected.iter().map(|i| i + 1).collect()))
+        let label = self.selected.iter().map(|&i| zone_label(&mz.zones, i)).collect::<Vec<_>>().join("+");
+        let gaming = matches!(self.selected[..], [i] if mz.zones[i].gaming);
+        Some(DropTarget { rect, label, gaming })
     }
 }
 

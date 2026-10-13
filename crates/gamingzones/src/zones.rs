@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use gz_core::layout::ResolvedZone;
+use gz_core::layout::{zone_label, Layout, ResolvedZone};
 use gz_core::store::{Applied, LayoutsFile, MonitorEntry, APPLIED_FILE, LAYOUTS_FILE};
 use gz_core::Rect;
 use gz_win::monitor::{self, MonitorIds, MonitorInfo};
@@ -20,6 +20,18 @@ pub struct MonitorZones {
     pub zones: Vec<ResolvedZone>,
 }
 
+impl MonitorZones {
+    /// The first gaming zone (index into `zones`), if the layout has one.
+    pub fn gaming_zone(&self) -> Option<usize> {
+        self.zones.iter().position(|z| z.gaming && !z.disabled)
+    }
+
+    /// What the overlay must cover: the work area, plus a gaming zone over the taskbar.
+    pub fn overlay_area(&self) -> Rect {
+        self.zones.iter().filter(|z| z.gaming && !z.disabled).fold(self.work, |a, z| a.union(&z.rect))
+    }
+}
+
 #[derive(Default)]
 pub struct ZoneConfig {
     layouts: Option<LayoutsFile>,
@@ -29,7 +41,7 @@ pub struct ZoneConfig {
 impl ZoneConfig {
     /// Loads both files, creating them if missing. On an error, the part that failed keeps
     /// its previous value and the error is returned for the tray notification.
-    pub fn reload(&mut self, dir: &Path) -> Vec<String> {
+    pub fn reload(&mut self, dir: &Path, deadzone_px: i32) -> Vec<String> {
         let mut errors = Vec::new();
         let layouts_path = dir.join(LAYOUTS_FILE);
         match LayoutsFile::load_or_create(&layouts_path) {
@@ -70,7 +82,7 @@ impl ZoneConfig {
                 errors.push(format!("{APPLIED_FILE}: unknown layout {}", unknown.join(", ")));
             }
         }
-        self.log_monitors();
+        self.log_monitors(deadzone_px);
         errors
     }
 
@@ -88,31 +100,44 @@ impl ZoneConfig {
         Applied { default_layout: default, monitors }
     }
 
-    fn log_monitors(&self) {
+    fn log_monitors(&self, deadzone_px: i32) {
         let ids = MonitorIds::query();
         for m in monitor::all() {
             let id = ids.id(&m);
             let label = if id.name.is_empty() { String::new() } else { format!(" \"{}\"", id.name) };
             log::info!("Monitor {}{label} {} work area {}, id {}", m.device, m.rect, m.work, id.id);
-            match self.for_monitor(&m, &ids) {
-                Some(mz) => {
-                    log::info!("    layout \"{}\", {} zones:", mz.layout_name, mz.zones.len());
-                    for (i, z) in mz.zones.iter().enumerate() {
-                        let note = if z.disabled { "  (disabled: too small)" } else { "" };
-                        log::info!("    zone {}: {}{note}", i + 1, z.rect);
+            let (Some(layout), Some(mz)) = (self.layout_for(&m, &ids), self.for_monitor(&m, &ids, deadzone_px)) else {
+                log::info!("    no zones");
+                continue;
+            };
+            log::info!("    layout \"{}\", {} zones:", mz.layout_name, mz.zones.len());
+            let mut gaming = layout.gaming_zones.iter();
+            for (i, z) in mz.zones.iter().enumerate() {
+                let mut note = "";
+                if z.gaming {
+                    // Shrunk to fit the monitor?
+                    let wanted = gaming.next().and_then(|g| g.size.pixels().ok());
+                    if let Some((w, h)) = wanted.filter(|&size| size != (z.rect.width(), z.rect.height())) {
+                        log::warn!("    gaming zone {w}×{h} doesn't fit on {}; it's shrunk to fit", m.device);
                     }
+                    note = "  (gaming zone)";
+                } else if z.disabled {
+                    note = "  (disabled: smaller than deadzone_px)";
                 }
-                None => log::info!("    no zones"),
+                log::info!("    zone {}: {}{note}", zone_label(&mz.zones, i), z.rect);
             }
         }
     }
 
-    /// The zones for a monitor, or `None` if it has no layout (or the layout is missing).
-    pub fn for_monitor(&self, m: &MonitorInfo, ids: &MonitorIds) -> Option<MonitorZones> {
+    fn layout_for(&self, m: &MonitorInfo, ids: &MonitorIds) -> Option<&Layout> {
         let layouts = self.layouts.as_ref()?;
-        let id = ids.id(m);
-        let layout = layouts.get(self.applied.layout_for(&id.id)?)?;
-        match layout.resolve(m.work, 0) {
+        layouts.get(self.applied.layout_for(&ids.id(m).id)?)
+    }
+
+    /// The zones for a monitor, or `None` if it has no layout (or the layout is missing).
+    pub fn for_monitor(&self, m: &MonitorInfo, ids: &MonitorIds, deadzone_px: i32) -> Option<MonitorZones> {
+        let layout = self.layout_for(m, ids)?;
+        match layout.resolve(m.work, m.rect, deadzone_px) {
             Ok(zones) => Some(MonitorZones {
                 device: m.device.clone(),
                 work: m.work,

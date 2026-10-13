@@ -11,13 +11,15 @@ use std::path::PathBuf;
 use gz_core::config::{LoadOutcome, SETTINGS_FILE};
 use gz_core::{Hotkey, Settings};
 use gz_win::keyhook::KeyboardHook;
+use gz_win::monitor::{self, MonitorIds};
 use gz_win::tray::{self, MenuItem, TrayIcon};
 use gz_win::window::{self, msg, Background, Message, WindowHandler, WindowSpec};
 use gz_win::winevent::{self, event, Delivery, Filter, WinEventHook};
 use gz_win::{hotkey, input, inspect, process, styles::ws, Hwnd};
 
-use crate::drag::{Drag, DragMessages};
-use crate::zones::ZoneConfig;
+use crate::drag::{Drag, DragMessages, DropTarget};
+use crate::snap::Picked;
+use crate::zones::{MonitorZones, ZoneConfig};
 use crate::{dump, logger, snap};
 
 /// Tray icon callback.
@@ -40,6 +42,7 @@ const CMD_EXIT: u32 = 4;
 
 /// Hotkey ids (`WM_HOTKEY` wParam).
 const HOTKEY_DEBUG_DUMP: i32 = 1;
+const HOTKEY_GAMING_SNAP: i32 = 2;
 
 /// Posted by the editor (Phase 3) after it saves, and usable by anything else.
 pub const RELOAD_MESSAGE: &str = "GamingZones.Reload";
@@ -137,7 +140,7 @@ impl App {
             }
         }
         self.register_hotkeys(hwnd);
-        let errors = self.zones.reload(&self.config_dir);
+        let errors = self.zones.reload(&self.config_dir, self.settings.snapping.deadzone_px);
         if !errors.is_empty() {
             self.notify("Layout files have an error", &format!("{}\nDetails are in the log.", errors.join("\n")));
         }
@@ -149,8 +152,9 @@ impl App {
                 log::warn!("Unregistering hotkey {id} failed: {}", e.message());
             }
         }
-        let wanted: [(i32, &str, Option<Hotkey>); 1] =
-            [(HOTKEY_DEBUG_DUMP, "debug_dump", self.settings.hotkeys.debug_dump)];
+        let keys = &self.settings.hotkeys;
+        let wanted: [(i32, &str, Option<Hotkey>); 2] =
+            [(HOTKEY_DEBUG_DUMP, "debug_dump", keys.debug_dump), (HOTKEY_GAMING_SNAP, "gaming_snap", keys.gaming_snap)];
         let mut failed = Vec::new();
         for (id, name, hotkey) in wanted {
             let Some(hotkey) = hotkey else {
@@ -225,7 +229,7 @@ impl App {
             log::debug!("Resize of {window} started; ignored");
             return;
         }
-        let target = match snap::check(window, &self.settings.snapping, self.self_elevated) {
+        let target = match snap::check(window, &self.settings.snapping, self.self_elevated, Picked::Drag) {
             Ok(t) => t,
             Err(skip) => {
                 log::debug!("Drag of {window} ignored: {skip}");
@@ -274,23 +278,80 @@ impl App {
             WinEventHook::live_count(),
             if KeyboardHook::is_installed() { "yes" } else { "no" }
         );
-        let Some((rect, numbers)) = target else { return };
-        let zones = numbers.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("+");
+        let Some(target) = target else { return };
         if inspect::is_maximized(window) {
             log::info!("Not snapping {exe}: it was maximised at the end of the drag (Windows Snap or a tab merge)");
             return;
         }
-        match snap::snap_frame(window, rect) {
+        self.snap(window, &exe, &target);
+    }
+
+    /// The gaming-snap hotkey: fits the foreground window's client area to the gaming zone
+    /// on its monitor or, if that monitor's layout has none, on the first monitor with one.
+    fn snap_to_gaming_zone(&mut self) {
+        let Some(window) = inspect::foreground_window() else { return };
+        let target = match snap::check(window, &self.settings.snapping, self.self_elevated, Picked::Hotkey) {
+            Ok(t) => t,
+            Err(skip) => {
+                log::info!("Gaming snap: foreground window {window} left alone: {skip}");
+                return;
+            }
+        };
+        if target.elevated {
+            log::warn!(
+                "Gaming snap: {} runs as administrator and GamingZones doesn't, so it can't be moved",
+                target.exe
+            );
+            self.notify(
+                "Can't snap this window",
+                &format!("{} runs as administrator. Run GamingZones as administrator to snap it.", target.exe),
+            );
+            return;
+        }
+        let Some((mz, i)) = self.gaming_monitor(window) else {
+            log::info!("Gaming snap: none of the layouts in use has a gaming zone");
+            self.notify("No gaming zone", "None of the layouts in use has a gaming zone.");
+            return;
+        };
+        if inspect::is_maximized(window) {
+            log::debug!("Gaming snap: restoring maximised {} first", target.exe);
+            window::restore(window);
+        }
+        let drop = DropTarget { rect: mz.zones[i].rect, label: format!("G on {}", mz.device), gaming: true };
+        self.snap(window, &target.exe, &drop);
+    }
+
+    /// The monitor whose gaming zone the hotkey uses, and the zone's index.
+    fn gaming_monitor(&self, window: Hwnd) -> Option<(MonitorZones, usize)> {
+        let ids = MonitorIds::query();
+        let mut others = monitor::all();
+        others.sort_by_key(|m| !m.primary);
+        monitor::for_window(window)
+            .into_iter()
+            .chain(others)
+            .filter_map(|m| self.zones.for_monitor(&m, &ids, self.settings.snapping.deadzone_px))
+            .find_map(|mz| mz.gaming_zone().map(|i| (mz, i)))
+    }
+
+    /// Moves `window`: its client area onto the gaming zone, or its visible frame onto other zones.
+    fn snap(&mut self, window: Hwnd, exe: &str, target: &DropTarget) {
+        let (result, what) = if target.gaming {
+            (snap::snap_client(window, target.rect, self.settings.snapping.gaming_fit), "client")
+        } else {
+            (snap::snap_frame(window, target.rect), "frame")
+        };
+        let zone = &target.label;
+        match result {
             Ok(s) if s.exact() => {
-                log::info!("Snapped {exe} to zone {zones}: frame {} (passes: {})", s.frame, s.passes)
+                log::info!("Snapped {exe} to zone {zone}: {what} {} (passes: {})", s.actual, s.passes)
             }
             Ok(s) => log::warn!(
-                "Snapped {exe} to zone {zones}, but its frame is {} instead of {} (the app limits its size?)",
-                s.frame,
+                "Snapped {exe} to zone {zone}, but its {what} is {} instead of {} (the app limits its size?)",
+                s.actual,
                 s.target
             ),
             Err(e) => {
-                log::warn!("Snapping {exe} to zone {zones} failed: {e}");
+                log::warn!("Snapping {exe} to zone {zone} failed: {e}");
                 if self.warned.insert(window) {
                     self.notify("Couldn't snap this window", &format!("{exe}: {e}"));
                 }
@@ -319,11 +380,11 @@ impl WindowHandler for App {
                     self.show_menu(hwnd);
                 }
             }
-            msg::HOTKEY => {
-                if m.wparam == HOTKEY_DEBUG_DUMP as usize {
-                    dump::log_foreground_window();
-                }
-            }
+            msg::HOTKEY => match m.wparam as i32 {
+                HOTKEY_DEBUG_DUMP => dump::log_foreground_window(),
+                HOTKEY_GAMING_SNAP => self.snap_to_gaming_zone(),
+                _ => {}
+            },
             WM_MOVESIZE => self.on_move_size(hwnd, m),
             WM_DRAG_LOCATION => {
                 if let Some(drag) = &self.drag {

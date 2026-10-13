@@ -2,7 +2,8 @@
 //!
 //! A layout is resolved against an *area* (normally a monitor's work area, in screen
 //! coordinates) to get each zone's rectangle in physical pixels. Guides are positioned
-//! relative to the area or to other guides, so the same layout works on any monitor.
+//! relative to the area, to the gaming zone or to other guides, so the same layout works
+//! on any monitor.
 //!
 //! ```json
 //! { "id": "wfh", "name": "WFH",
@@ -16,6 +17,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::gaming::{GamingZone, SizeError};
 use crate::geometry::Rect;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,24 +72,40 @@ pub struct Zone {
 pub struct Layout {
     pub id: String,
     pub name: String,
+    /// The gaming zone (the editor allows at most one; its guides are `gz0.*`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaming_zones: Vec<GamingZone>,
+    /// The gaming zone may extend over the taskbar (it's kept inside the monitor instead of
+    /// the work area). Other zones always stay in the work area.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gaming_over_taskbar: bool,
     #[serde(default)]
     pub guides: Vec<Guide>,
+    #[serde(default)]
     pub zones: Vec<Zone>,
 }
 
 /// The built-in guides on the area's edges. User guide ids may not contain a `.`, so they
-/// can never clash with these (or with Phase 2's `gz0.left` etc.).
+/// can never clash with these or with the gaming zone's (`gz0.left` etc., see [`gaming_guide`]).
 pub const AREA_LEFT: &str = "area.left";
 pub const AREA_RIGHT: &str = "area.right";
 pub const AREA_TOP: &str = "area.top";
 pub const AREA_BOTTOM: &str = "area.bottom";
 
-fn builtin(id: &str) -> Option<Axis> {
-    match id {
-        AREA_LEFT | AREA_RIGHT => Some(Axis::Vertical),
-        AREA_TOP | AREA_BOTTOM => Some(Axis::Horizontal),
-        _ => None,
-    }
+/// The built-in guide on one edge of gaming zone `index`: `gz0.left`, `gz0.right`, `gz0.top`
+/// or `gz0.bottom` (`edge` is the part after the dot).
+pub fn gaming_guide(index: usize, edge: &str) -> String {
+    format!("gz{index}.{edge}")
+}
+
+/// The built-in guides on a rectangle's edges: `(prefix.left, …)` with their positions.
+fn edge_guides(prefix: &str, r: Rect) -> [(String, Axis, i32); 4] {
+    [
+        (format!("{prefix}.left"), Axis::Vertical, r.left),
+        (format!("{prefix}.right"), Axis::Vertical, r.right),
+        (format!("{prefix}.top"), Axis::Horizontal, r.top),
+        (format!("{prefix}.bottom"), Axis::Horizontal, r.bottom),
+    ]
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +129,10 @@ pub enum LayoutError {
     BadNumber {
         guide: String,
     },
+    GamingZone {
+        index: usize,
+        error: SizeError,
+    },
 }
 
 impl fmt::Display for LayoutError {
@@ -127,6 +149,7 @@ impl fmt::Display for LayoutError {
             Self::Cycle(ids) => write!(f, "guides depend on each other in a loop: {}", ids.join(" → ")),
             Self::NoZones => write!(f, "layout has no zones"),
             Self::BadNumber { guide } => write!(f, "guide \"{guide}\" has a number that is not finite"),
+            Self::GamingZone { index, error } => write!(f, "gaming zone gz{index}: {error}"),
         }
     }
 }
@@ -140,21 +163,29 @@ pub struct ResolvedZone {
     /// Too small to use (width or height below the threshold, or not positive). Never a
     /// snap target.
     pub disabled: bool,
+    /// A gaming zone: windows snapped to it alone get their client area fitted, not their frame.
+    pub gaming: bool,
 }
 
 impl Layout {
-    /// Checks guide ids, references, axes and cycles without needing an area.
+    /// Checks guide ids, references, axes, cycles and gaming zone sizes without needing an area.
     pub fn validate(&self) -> Result<(), LayoutError> {
-        self.resolve(Rect::new(0, 0, 1000, 1000), 0).map(|_| ())
+        let area = Rect::new(0, 0, 1000, 1000);
+        self.resolve(area, area, 0).map(|_| ())
     }
 
-    /// Resolves every zone against `area`. Zones keep their order (zone number = index + 1).
-    /// A zone narrower or shorter than `deadzone_px` (or not positive) is marked disabled.
-    pub fn resolve(&self, area: Rect, deadzone_px: i32) -> Result<Vec<ResolvedZone>, LayoutError> {
-        if self.zones.is_empty() {
+    /// Resolves every zone against `area` (the monitor's work area; `monitor` is the whole
+    /// monitor, used only by a gaming zone allowed over the taskbar).
+    ///
+    /// The layout's zones come first, in order (zone number = index + 1), then the gaming
+    /// zones. A zone narrower or shorter than `deadzone_px` (or not positive) is marked
+    /// disabled; gaming zones have an exact size and aren't.
+    pub fn resolve(&self, area: Rect, monitor: Rect, deadzone_px: i32) -> Result<Vec<ResolvedZone>, LayoutError> {
+        if self.zones.is_empty() && self.gaming_zones.is_empty() {
             return Err(LayoutError::NoZones);
         }
-        let positions = Resolver::new(self, area)?.resolve_all()?;
+        let gaming = self.gaming_rects(area, monitor)?;
+        let positions = Resolver::new(self, area, &gaming)?.resolve_all()?;
         let pos = |referenced_by: String, id: &str, expected: Axis| -> Result<i32, LayoutError> {
             let (axis, value) = *positions
                 .get(id)
@@ -176,9 +207,35 @@ impl Layout {
                     pos(side("bottom"), &z.bottom, Axis::Horizontal)?,
                 );
                 let min = deadzone_px.max(1);
-                Ok(ResolvedZone { rect, disabled: rect.width() < min || rect.height() < min })
+                Ok(ResolvedZone { rect, disabled: rect.width() < min || rect.height() < min, gaming: false })
             })
+            .chain(gaming.iter().map(|&rect| Ok(ResolvedZone { rect, disabled: rect.is_empty(), gaming: true })))
             .collect()
+    }
+
+    /// Each gaming zone's rectangle (see [`GamingZone::place`]).
+    pub fn gaming_rects(&self, area: Rect, monitor: Rect) -> Result<Vec<Rect>, LayoutError> {
+        let bounds = if self.gaming_over_taskbar { monitor } else { area };
+        self.gaming_zones
+            .iter()
+            .enumerate()
+            .map(|(index, g)| g.place(area, bounds).map_err(|error| LayoutError::GamingZone { index, error }))
+            .collect()
+    }
+}
+
+/// A zone's label in the overlay and the log: its number, or `G` for the gaming zone
+/// (`G1`, `G2`, … if a layout has several).
+pub fn zone_label(zones: &[ResolvedZone], i: usize) -> String {
+    if !zones[i].gaming {
+        return (i + 1).to_string();
+    }
+    let gaming = zones.iter().filter(|z| z.gaming).count();
+    let nth = zones[..i].iter().filter(|z| z.gaming).count() + 1;
+    if gaming == 1 {
+        "G".to_string()
+    } else {
+        format!("G{nth}")
     }
 }
 
@@ -191,6 +248,8 @@ enum State {
 /// Evaluates guides in dependency order (depth-first with cycle detection).
 struct Resolver<'a> {
     area: Rect,
+    /// `area.*` and `gz<n>.*`, already positioned.
+    builtins: HashMap<String, (Axis, i32)>,
     guides: HashMap<&'a str, &'a Guide>,
     state: HashMap<&'a str, State>,
     /// Current dependency chain, for the cycle error message.
@@ -198,7 +257,12 @@ struct Resolver<'a> {
 }
 
 impl<'a> Resolver<'a> {
-    fn new(layout: &'a Layout, area: Rect) -> Result<Self, LayoutError> {
+    fn new(layout: &'a Layout, area: Rect, gaming: &[Rect]) -> Result<Self, LayoutError> {
+        let mut builtins: HashMap<String, (Axis, i32)> =
+            edge_guides("area", area).into_iter().map(|(id, axis, v)| (id, (axis, v))).collect();
+        for (i, &r) in gaming.iter().enumerate() {
+            builtins.extend(edge_guides(&format!("gz{i}"), r).into_iter().map(|(id, axis, v)| (id, (axis, v))));
+        }
         let mut guides = HashMap::new();
         for g in &layout.guides {
             if g.id.contains('.') {
@@ -208,15 +272,11 @@ impl<'a> Resolver<'a> {
                 return Err(LayoutError::DuplicateGuide(g.id.clone()));
             }
         }
-        Ok(Self { area, guides, state: HashMap::new(), stack: Vec::new() })
+        Ok(Self { area, builtins, guides, state: HashMap::new(), stack: Vec::new() })
     }
 
     fn resolve_all(mut self) -> Result<HashMap<String, (Axis, i32)>, LayoutError> {
-        let mut out = HashMap::new();
-        for id in [AREA_LEFT, AREA_RIGHT, AREA_TOP, AREA_BOTTOM] {
-            let axis = builtin(id).expect("built-in");
-            out.insert(id.to_string(), (axis, self.builtin_position(id)));
-        }
+        let mut out = self.builtins.clone();
         let ids: Vec<&'a str> = self.guides.keys().copied().collect();
         for id in ids {
             let axis = self.guides[id].axis;
@@ -224,15 +284,6 @@ impl<'a> Resolver<'a> {
             out.insert(id.to_string(), (axis, value));
         }
         Ok(out)
-    }
-
-    fn builtin_position(&self, id: &str) -> i32 {
-        match id {
-            AREA_LEFT => self.area.left,
-            AREA_RIGHT => self.area.right,
-            AREA_TOP => self.area.top,
-            _ => self.area.bottom,
-        }
     }
 
     /// The area's start and end along the axis a guide measures.
@@ -245,11 +296,11 @@ impl<'a> Resolver<'a> {
 
     /// Position of guide `id`, which must be on `expected` axis.
     fn position(&mut self, id: &str, expected: Axis, referenced_by: &dyn Fn() -> String) -> Result<i32, LayoutError> {
-        if let Some(axis) = builtin(id) {
+        if let Some(&(axis, value)) = self.builtins.get(id) {
             if axis != expected {
                 return Err(LayoutError::WrongAxis { referenced_by: referenced_by(), id: id.into(), expected });
             }
-            return Ok(self.builtin_position(id));
+            return Ok(value);
         }
         let Some(&guide) = self.guides.get(id) else {
             return Err(LayoutError::UnknownGuide { referenced_by: referenced_by(), id: id.into() });
@@ -382,6 +433,7 @@ pub fn bounding_rect<'a>(zones: &[ResolvedZone], indices: impl IntoIterator<Item
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gaming::{GamingSize, Position};
 
     fn guide(id: &str, axis: Axis, anchor: Anchor) -> Guide {
         Guide { id: id.into(), axis, anchor }
@@ -392,11 +444,11 @@ mod tests {
     }
 
     fn layout(guides: Vec<Guide>, zones: Vec<Zone>) -> Layout {
-        Layout { id: "t".into(), name: "Test".into(), guides, zones }
+        Layout { id: "t".into(), name: "Test".into(), gaming_zones: vec![], gaming_over_taskbar: false, guides, zones }
     }
 
     fn rz(l: i32, t: i32, r: i32, b: i32) -> ResolvedZone {
-        ResolvedZone { rect: Rect::new(l, t, r, b), disabled: false }
+        ResolvedZone { rect: Rect::new(l, t, r, b), disabled: false, gaming: false }
     }
 
     /// Two columns split at 50%.
@@ -409,7 +461,7 @@ mod tests {
 
     #[test]
     fn resolves_in_screen_coordinates() {
-        let zones = halves().resolve(Rect::new(100, 50, 1100, 850), 0).unwrap();
+        let zones = halves().resolve(Rect::new(100, 50, 1100, 850), Rect::new(100, 50, 1100, 850), 0).unwrap();
         assert_eq!(zones[0].rect, Rect::new(100, 50, 600, 850));
         assert_eq!(zones[1].rect, Rect::new(600, 50, 1100, 850));
         assert!(zones.iter().all(|z| !z.disabled));
@@ -425,7 +477,7 @@ mod tests {
             ],
             vec![zone("a", AREA_TOP, "c", AREA_BOTTOM), zone("c", AREA_TOP, "b", AREA_BOTTOM)],
         );
-        let zones = l.resolve(Rect::new(0, 0, 1000, 500), 0).unwrap();
+        let zones = l.resolve(Rect::new(0, 0, 1000, 500), Rect::new(0, 0, 1000, 500), 0).unwrap();
         // a = 100, b = 900, c = 100 + 800 * 0.25 = 300
         assert_eq!(zones[0].rect, Rect::new(100, 0, 300, 500));
         assert_eq!(zones[1].rect, Rect::new(300, 0, 900, 500));
@@ -437,7 +489,10 @@ mod tests {
             vec![guide("far", Axis::Vertical, Anchor::Px(5000)), guide("neg", Axis::Vertical, Anchor::Percent(-10.0))],
             vec![zone("neg", AREA_TOP, "far", AREA_BOTTOM)],
         );
-        assert_eq!(l.resolve(Rect::new(10, 0, 1010, 100), 0).unwrap()[0].rect, Rect::new(10, 0, 1010, 100));
+        assert_eq!(
+            l.resolve(Rect::new(10, 0, 1010, 100), Rect::new(10, 0, 1010, 100), 0).unwrap()[0].rect,
+            Rect::new(10, 0, 1010, 100)
+        );
     }
 
     #[test]
@@ -451,16 +506,16 @@ mod tests {
                 zone(AREA_LEFT, AREA_BOTTOM, "a", AREA_TOP), // negative height
             ],
         );
-        let zones = l.resolve(Rect::new(0, 0, 1000, 500), 0).unwrap();
+        let zones = l.resolve(Rect::new(0, 0, 1000, 500), Rect::new(0, 0, 1000, 500), 0).unwrap();
         assert_eq!(zones.iter().map(|z| z.disabled).collect::<Vec<_>>(), [false, true, true, true]);
         assert_eq!(zones[2].rect.width(), -300);
     }
 
     #[test]
     fn deadzone_threshold() {
-        let zones = halves().resolve(Rect::new(0, 0, 1000, 500), 400).unwrap();
+        let zones = halves().resolve(Rect::new(0, 0, 1000, 500), Rect::new(0, 0, 1000, 500), 400).unwrap();
         assert!(!zones[0].disabled); // 500 × 500
-        let zones = halves().resolve(Rect::new(0, 0, 700, 500), 400).unwrap();
+        let zones = halves().resolve(Rect::new(0, 0, 700, 500), Rect::new(0, 0, 700, 500), 400).unwrap();
         assert!(zones[0].disabled); // 350 wide
     }
 
@@ -536,9 +591,112 @@ mod tests {
             "zones": [ { "left": "a", "right": "b", "top": "c", "bottom": "d" } ] }"#;
         let l: Layout = serde_json::from_str(json).unwrap();
         assert_eq!(l.guides[1].anchor, Anchor::Between { a: "a".into(), b: AREA_RIGHT.into(), fraction: 0.5 });
-        assert_eq!(l.resolve(Rect::new(0, 0, 1000, 1000), 0).unwrap()[0].rect, Rect::new(500, 100, 750, 900));
+        assert_eq!(
+            l.resolve(Rect::new(0, 0, 1000, 1000), Rect::new(0, 0, 1000, 1000), 0).unwrap()[0].rect,
+            Rect::new(500, 100, 750, 900)
+        );
         let again: Layout = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(again, l);
+    }
+
+    // --- gaming zone ---
+
+    /// A 400×300 gaming zone with a column either side and a strip above and below it.
+    fn around(x: Position, y: Position) -> Layout {
+        let mut l = layout(
+            vec![],
+            vec![
+                zone(AREA_LEFT, AREA_TOP, "gz0.left", AREA_BOTTOM),
+                zone("gz0.left", AREA_TOP, "gz0.right", "gz0.top"),
+                zone("gz0.left", "gz0.bottom", "gz0.right", AREA_BOTTOM),
+                zone("gz0.right", AREA_TOP, AREA_RIGHT, AREA_BOTTOM),
+            ],
+        );
+        l.gaming_zones = vec![GamingZone { size: GamingSize::Pixels { w: 400, h: 300 }, x, y }];
+        l
+    }
+
+    #[test]
+    fn neighbours_follow_the_gaming_zone() {
+        let area = Rect::new(0, 0, 1000, 500);
+        let rects = |l: Layout| l.resolve(area, area, 0).unwrap().into_iter().map(|z| z.rect).collect::<Vec<_>>();
+        assert_eq!(
+            rects(around(Position::default(), Position::default())),
+            [
+                Rect::new(0, 0, 300, 500),
+                Rect::new(300, 0, 700, 100),
+                Rect::new(300, 400, 700, 500),
+                Rect::new(700, 0, 1000, 500),
+                Rect::new(300, 100, 700, 400), // the gaming zone, last
+            ]
+        );
+        // Moving the gaming zone moves its neighbours' edges with it.
+        assert_eq!(
+            rects(around(Position::Px(100), Position::Px(0))),
+            [
+                Rect::new(0, 0, 100, 500),
+                Rect::new(100, 0, 500, 0),
+                Rect::new(100, 300, 500, 500),
+                Rect::new(500, 0, 1000, 500),
+                Rect::new(100, 0, 500, 300),
+            ]
+        );
+    }
+
+    #[test]
+    fn gaming_zone_flags_and_labels() {
+        let area = Rect::new(0, 0, 1000, 500);
+        let zones = around(Position::default(), Position::Px(0)).resolve(area, area, 150).unwrap();
+        // The strip above is 0 px, the one below 200 px (above the 150 px threshold).
+        assert_eq!(
+            zones.iter().map(|z| (z.disabled, z.gaming)).collect::<Vec<_>>(),
+            [(false, false), (true, false), (false, false), (false, false), (false, true),]
+        );
+        let labels: Vec<String> = (0..zones.len()).map(|i| zone_label(&zones, i)).collect();
+        assert_eq!(labels, ["1", "2", "3", "4", "G"]);
+
+        // The gaming zone is a snap target like any other.
+        assert_eq!(zones_at(&zones, 500, 200, None), [4]);
+        let mut two = zones.clone();
+        two.push(ResolvedZone { gaming: true, ..zones[4] });
+        assert_eq!(zone_label(&two, 5), "G2");
+    }
+
+    #[test]
+    fn gaming_zone_errors() {
+        // gz0 guides only exist when there is a gaming zone.
+        let mut l = around(Position::default(), Position::default());
+        l.gaming_zones.clear();
+        assert!(matches!(l.validate(), Err(LayoutError::UnknownGuide { id, .. }) if id == "gz0.left"));
+        // gz0.top is horizontal.
+        let mut l = around(Position::default(), Position::default());
+        l.zones[0].left = "gz0.top".into();
+        assert!(matches!(l.validate(), Err(LayoutError::WrongAxis { .. })));
+        // A zero size is reported with the zone's index.
+        let mut l = around(Position::default(), Position::default());
+        l.gaming_zones[0].size = GamingSize::Pixels { w: 0, h: 10 };
+        assert_eq!(l.validate(), Err(LayoutError::GamingZone { index: 0, error: SizeError::Zero }));
+        // A layout may be just a gaming zone.
+        let mut l = around(Position::default(), Position::default());
+        l.zones.clear();
+        assert_eq!(l.resolve(Rect::new(0, 0, 1000, 500), Rect::new(0, 0, 1000, 500), 0).unwrap().len(), 1);
+        assert_eq!(gaming_guide(0, "left"), "gz0.left");
+    }
+
+    #[test]
+    fn gaming_zone_over_the_taskbar() {
+        let (work, monitor) = (Rect::new(0, 0, 1000, 460), Rect::new(0, 0, 1000, 500));
+        let mut l = around(Position::default(), Position::default());
+        l.gaming_zones[0].size = GamingSize::Pixels { w: 400, h: 500 };
+        // Not allowed: shrunk to the work area's height.
+        assert_eq!(l.resolve(work, monitor, 0).unwrap()[4].rect, Rect::new(300, 0, 700, 460));
+        // Allowed: full height, over the taskbar; the strip below it is gone (negative).
+        l.gaming_over_taskbar = true;
+        let zones = l.resolve(work, monitor, 0).unwrap();
+        assert_eq!(zones[4].rect, Rect::new(300, 0, 700, 500));
+        assert!(zones[2].disabled);
+        // Other zones stay in the work area.
+        assert_eq!(zones[0].rect, Rect::new(0, 0, 300, 460));
     }
 
     // --- zone picking ---

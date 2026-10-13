@@ -10,7 +10,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gz_core::config::Overlay as OverlayStyle;
-use gz_core::layout::ResolvedZone;
+use gz_core::layout::{zone_label, ResolvedZone};
+use gz_core::DisabledZones;
 use gz_core::{Color, Rect};
 use gz_win::controls::Font;
 use gz_win::window::{self, msg, Background, Message, WindowHandler, WindowSpec};
@@ -22,7 +23,7 @@ const TRANSPARENT: Color = Color::rgb(0xFE, 0x00, 0xFE);
 /// What the overlay shows. Shared between the drag code (writes) and the overlay
 /// window's WM_PAINT (reads).
 struct View {
-    /// The window's rect on screen (the work area).
+    /// The window's rect on screen (the work area, plus a gaming zone over the taskbar).
     area: Rect,
     zones: Vec<ResolvedZone>,
     selected: Vec<usize>,
@@ -39,7 +40,7 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    /// Creates the overlay (hidden) for `area` (screen coordinates).
+    /// Creates the overlay (hidden) covering `area` (screen coordinates).
     pub fn create(area: Rect, zones: Vec<ResolvedZone>, dpi: u32, style: &OverlayStyle) -> gz_win::Result<Overlay> {
         let view =
             Rc::new(RefCell::new(View { area, zones, selected: Vec::new(), style: style.clone(), dpi, font: None }));
@@ -113,24 +114,38 @@ impl View {
         self.font = Font::sized("Segoe UI", height, 600).ok();
     }
 
+    /// Zones that are drawn: enabled ones, and disabled ones unless they're hidden.
+    /// Disabled zones with no area (e.g. squeezed to 0 px by the gaming zone) are skipped.
+    fn drawn(&self) -> impl Iterator<Item = (usize, &ResolvedZone)> {
+        let greyed = self.style.disabled_zones == DisabledZones::Greyed;
+        self.zones.iter().enumerate().filter(move |(_, z)| !z.disabled || (greyed && !z.rect.is_empty()))
+    }
+
     fn paint(&self, hwnd: Hwnd) {
         let to_client = |r: Rect| r.offset(-self.area.left, -self.area.top);
         let border = dpi::scale(2, self.dpi);
         paint::paint(hwnd, |p| {
             // Outside the zones: the transparent colour. Every pixel is painted once, so
             // there is no flicker when the highlight moves.
-            for z in self.zones.iter().filter(|z| !z.disabled) {
+            for (_, z) in self.drawn() {
                 p.exclude(to_client(z.rect));
             }
             p.fill(Rect::new(0, 0, self.area.width(), self.area.height()), TRANSPARENT);
             p.reset_clip();
-            for (i, z) in self.zones.iter().enumerate().filter(|(_, z)| !z.disabled) {
+            for (i, z) in self.drawn() {
                 let r = to_client(z.rect);
-                let fill = if self.selected.contains(&i) { self.style.highlight_color } else { self.style.zone_color };
+                let fill = if z.disabled {
+                    self.style.disabled_color
+                } else if self.selected.contains(&i) {
+                    self.style.highlight_color
+                } else {
+                    self.style.zone_color
+                };
                 p.fill(Rect::new(r.left + border, r.top + border, r.right - border, r.bottom - border), fill);
                 p.frame(r, self.style.border_color, border);
-                if let Some(font) = &self.font {
-                    p.text_centered(r, &(i + 1).to_string(), font, self.style.number_color);
+                // Disabled zones get no number: they can't be snapped to (and may be tiny).
+                if let (Some(font), false) = (&self.font, z.disabled) {
+                    p.text_centered(r, &zone_label(&self.zones, i), font, self.style.number_color);
                 }
             }
         });

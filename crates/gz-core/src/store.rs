@@ -12,7 +12,8 @@ use crate::layout::{Layout, LayoutError};
 pub const LAYOUTS_FILE: &str = "layouts.json";
 pub const APPLIED_FILE: &str = "applied.json";
 
-/// Written to `layouts.json` when it doesn't exist: Split focus, WFH and Slay (PLAN §3).
+/// Written to `layouts.json` when it doesn't exist: Split focus, WFH, Slay and Gaming-Focus
+/// (PLAN §3). The first is the one new monitors get.
 pub const DEFAULT_LAYOUTS_JSON: &str = include_str!("default_layouts.json");
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -144,9 +145,10 @@ mod tests {
 
     /// Tom's 6144×2560 monitor with a 60 px taskbar (48 px at 125%) at the bottom.
     const WORK: Rect = Rect::new(0, 0, 6144, 2500);
+    const MONITOR: Rect = Rect::new(0, 0, 6144, 2560);
 
     fn rects(id: &str) -> Vec<Rect> {
-        let zones: Vec<ResolvedZone> = LayoutsFile::defaults().get(id).unwrap().resolve(WORK, 0).unwrap();
+        let zones: Vec<ResolvedZone> = LayoutsFile::defaults().get(id).unwrap().resolve(WORK, MONITOR, 0).unwrap();
         assert!(zones.iter().all(|z| !z.disabled));
         zones.into_iter().map(|z| z.rect).collect()
     }
@@ -165,9 +167,9 @@ mod tests {
     }
 
     #[test]
-    fn default_layouts_are_split_focus_wfh_slay() {
+    fn default_layouts() {
         let ids: Vec<String> = LayoutsFile::defaults().layouts.into_iter().map(|l| l.id).collect();
-        assert_eq!(ids, ["split-focus", "wfh", "slay"]);
+        assert_eq!(ids, ["split-focus", "wfh", "slay", "gaming-focus"]);
     }
 
     #[test]
@@ -215,11 +217,35 @@ mod tests {
     }
 
     #[test]
+    fn gaming_focus() {
+        let r = rects("gaming-focus");
+        // 3840×2160 centred in 6144×2500: x 1152..4992, y 170..2330.
+        assert_eq!(
+            r,
+            [
+                Rect::new(0, 0, 1152, 1250),
+                Rect::new(0, 1250, 1152, 2500),
+                Rect::new(1152, 0, 4992, 170),
+                Rect::new(1152, 2330, 4992, 2500),
+                Rect::new(4992, 0, 6144, 1250),
+                Rect::new(4992, 1250, 6144, 2500),
+                Rect::new(1152, 170, 4992, 2330),
+            ]
+        );
+        assert_tiles(&r, WORK);
+        // With the default 400 px threshold the 170 px strips above and below are disabled.
+        let zones = LayoutsFile::defaults().get("gaming-focus").unwrap().resolve(WORK, MONITOR, 400).unwrap();
+        let disabled: Vec<usize> = (0..zones.len()).filter(|&i| zones[i].disabled).collect();
+        assert_eq!(disabled, [2, 3]);
+        assert!(zones[6].gaming);
+    }
+
+    #[test]
     fn layouts_tile_odd_areas_too() {
         // A second monitor left of the primary, with an odd size and the taskbar on top.
         let area = Rect::new(-1921, 41, 0, 1081);
         for layout in LayoutsFile::defaults().layouts {
-            let r: Vec<Rect> = layout.resolve(area, 0).unwrap().into_iter().map(|z| z.rect).collect();
+            let r: Vec<Rect> = layout.resolve(area, area, 0).unwrap().into_iter().map(|z| z.rect).collect();
             assert_tiles(&r, area);
         }
     }
