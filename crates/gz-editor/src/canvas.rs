@@ -5,7 +5,7 @@
 use eframe::egui::{self, Align2, Color32, CursorIcon, FontId, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use gz_core::edit::{self, Divider};
 use gz_core::gaming::Position;
-use gz_core::layout::{Axis, ResolvedZone};
+use gz_core::layout::{zone_number, Axis, ResolvedZone};
 use gz_core::Rect;
 
 use crate::app::{Editor, Selection, MIN_ZONE_PX};
@@ -264,7 +264,8 @@ impl Editor {
             painter.rect_stroke(r, 3.0, Stroke::new(1.0, ZONE_STROKE), StrokeKind::Inside);
             let lock = if self.is_locked(i) { "🔒 " } else { "" };
             let size = format!("{lock}{} × {}", z.rect.width(), z.rect.height());
-            label(&painter, r, &(i + 1).to_string(), &size, if z.disabled { TEXT_WEAK } else { TEXT });
+            let number = zone_number(&zones, i).map_or(String::new(), |n| n.to_string());
+            label(&painter, r, &number, &size, if z.disabled { TEXT_WEAK } else { TEXT });
         }
         if let Some(g) = zones.get(normal) {
             let r = view.rect(g.rect);
@@ -336,18 +337,21 @@ impl Editor {
         }
     }
 
-    /// Moves the gaming zone's top-left corner to (`left`, `top`), kept inside the area.
+    /// Moves the gaming zone's top-left corner to (`left`, `top`), kept inside its space.
     pub fn move_gaming_zone(&mut self, left: i32, top: i32) {
         let (work, monitor) = self.areas();
         let Ok(rects) = self.current().gaming_rects(work, monitor) else { return };
         let Some(g) = rects.first().copied() else { return };
-        let bounds = if self.current().gaming_over_taskbar { monitor } else { work };
+        let Ok((space, bounds)) = self.current().gaming_space(0, work, monitor) else { return };
         let left = left.clamp(bounds.left, (bounds.right - g.width()).max(bounds.left));
         let top = top.clamp(bounds.top, (bounds.bottom - g.height()).max(bounds.top));
-        self.edit_layout("gaming-move", |l, w, _| {
+        if (left, top) == (g.left, g.top) {
+            return;
+        }
+        self.edit_layout("gaming-move", |l, _, _| {
             let gz = &mut l.gaming_zones[0];
-            gz.x = Position::Px(left - w.left);
-            gz.y = Position::Px(top - w.top);
+            gz.x = Position::Px(left - space.left);
+            gz.y = Position::Px(top - space.top);
             Ok(())
         });
     }

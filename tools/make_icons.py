@@ -15,7 +15,6 @@ RES = pathlib.Path(__file__).resolve().parent.parent / "res"
 SIDE = ((0x6C, 0x7E, 0xA4), (0x46, 0x53, 0x72))   # slate zones
 GAME = ((0x4A, 0xE8, 0x8C), (0x1C, 0xA0, 0x58))   # green gaming zone
 RULER = ((0xFF, 0xD3, 0x4E), (0xF0, 0xA2, 0x1C))  # yellow ruler body
-EDIT = ((0x4C, 0xB4, 0xFF), (0x00, 0x7A, 0xE6))   # blue: the editor's selected zone
 
 # Gaming-Focus in miniature: two stacked zones each side, a big gaming zone in the middle.
 GZ_SHAPES = [
@@ -23,8 +22,8 @@ GZ_SHAPES = [
     (0.28, 0.14, 0.72, 0.86, GAME),
     (0.76, 0.14, 0.98, 0.48, SIDE), (0.76, 0.52, 0.98, 0.86, SIDE),
 ]
-# The editor: the tray icon's layout, with the gaming zone in the editor's blue.
-EDITOR_SHAPES = [shape if shape[4] is not GAME else shape[:4] + (EDIT,) for shape in GZ_SHAPES]
+# The editor uses the same icon as the tray app (Tom's choice).
+EDITOR_SHAPES = GZ_SHAPES
 # A ruler with tick marks cut out of its top edge.
 RULER_SHAPES = [(0.02, 0.28, 0.98, 0.72, RULER)]
 RULER_TICKS = [(0.10 + i * 0.1, 0.28, 0.10 + i * 0.1 + 0.035, 0.28 + (0.24 if i % 5 == 0 else 0.14)) for i in range(9)]

@@ -1,9 +1,12 @@
 //! The gaming zone: a zone of an exact size (a game's resolution), placed in the layout
-//! area. Other zones can use its edges through the built-in guides `gz0.left`,
-//! `gz0.right`, `gz0.top` and `gz0.bottom`, so they rearrange themselves around it.
+//! area, or within a space of its own (`within`, four guides, like a zone). Other zones can
+//! use its edges through the built-in guides `gz0.left`, `gz0.right`, `gz0.top` and
+//! `gz0.bottom`, so they rearrange themselves around it.
 //!
 //! ```json
 //! "gaming_zones": [ { "size": { "pixels": { "w": 3840, "h": 2160 } }, "x": "centre", "y": 200 } ]
+//! "gaming_zones": [ { "size": { "pixels": { "w": 1920, "h": 1080 } }, "x": "centre", "y": "centre",
+//!                     "within": { "left": "g1", "right": "g2", "top": "area.top", "bottom": "area.bottom" } } ]
 //! ```
 
 use std::fmt;
@@ -11,6 +14,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::Rect;
+use crate::layout::Zone;
 
 /// Largest width or height accepted. Nothing has a monitor this big, so a larger size is
 /// a typo (and keeps the maths far from overflowing).
@@ -91,9 +95,9 @@ pub fn largest_aspect_step(ratio_w: u32, ratio_h: u32, w: i32, h: i32) -> u32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Position {
-    /// Pixels from the layout area's left (x) or top (y) edge.
+    /// Pixels from the left (x) or top (y) edge of its space (the layout area, or `within`).
     Px(i32),
-    /// `"centre"` (or `"center"`): centred in the layout area.
+    /// `"centre"` (or `"center"`): centred in its space.
     Align(Align),
 }
 
@@ -110,20 +114,29 @@ impl Default for Position {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GamingZone {
     pub size: GamingSize,
     #[serde(default)]
     pub x: Position,
     #[serde(default)]
     pub y: Position,
+    /// Its space: the guides around it (the zone it was made from). The parts of the space
+    /// it doesn't cover are normal zones. `None`: the whole layout area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within: Option<Zone>,
 }
 
 impl GamingZone {
-    /// The zone's rectangle. Positions are relative to `area` (the layout area) and
-    /// "centre" centres in it. The zone is then kept inside `bounds` (the work area, or the
-    /// whole monitor if the layout lets the gaming zone cover the taskbar); a zone bigger
-    /// than `bounds` is shrunk to fit.
+    /// A gaming zone in the whole layout area.
+    pub fn new(size: GamingSize, x: Position, y: Position) -> GamingZone {
+        GamingZone { size, x, y, within: None }
+    }
+
+    /// The zone's rectangle. Positions are relative to `area` (its space) and "centre"
+    /// centres in it. The zone is then kept inside `bounds` (its space, stretched to the
+    /// monitor's edges where the layout lets the gaming zone cover the taskbar); a zone
+    /// bigger than `bounds` is shrunk to fit.
     pub fn place(&self, area: Rect, bounds: Rect) -> Result<Rect, SizeError> {
         let (w, h) = self.size.pixels()?;
         let (w, h) = (w.min(bounds.width().max(0)), h.min(bounds.height().max(0)));
@@ -210,32 +223,32 @@ mod tests {
 
     #[test]
     fn placement() {
-        let zone = |x, y| GamingZone { size: px(3840, 2160), x, y };
+        let zone = |x, y| GamingZone::new(px(3840, 2160), x, y);
         let centre = Position::default();
         // Centred in Tom's work area.
         assert_eq!(zone(centre, centre).place(WORK, WORK), Ok(Rect::new(1152, 170, 4992, 2330)));
         // Pixel positions are relative to the area, in screen coordinates.
         let area = Rect::new(6144, 0, 9984, 2016);
-        let small = GamingZone { size: px(1920, 1080), x: Position::Px(10), y: Position::Px(20) };
+        let small = GamingZone::new(px(1920, 1080), Position::Px(10), Position::Px(20));
         assert_eq!(small.place(area, area), Ok(Rect::from_xywh(6154, 20, 1920, 1080)));
         // Clamped so it stays inside.
         assert_eq!(zone(Position::Px(5000), Position::Px(-50)).place(WORK, WORK), Ok(Rect::new(2304, 0, 6144, 2160)));
         // Too big: shrunk to fit.
-        let big = GamingZone { size: px(7000, 3000), x: centre, y: centre };
+        let big = GamingZone::new(px(7000, 3000), centre, centre);
         assert_eq!(big.place(WORK, WORK), Ok(WORK));
     }
 
     #[test]
     fn over_the_taskbar() {
         // Taller than the work area: shrunk to it normally, but allowed over the taskbar.
-        let tall = GamingZone { size: px(4552, 2560), x: Position::default(), y: Position::default() };
+        let tall = GamingZone::new(px(4552, 2560), Position::default(), Position::default());
         assert_eq!(tall.place(WORK, WORK), Ok(Rect::new(796, 0, 5348, 2500)));
         assert_eq!(tall.place(WORK, MONITOR), Ok(Rect::new(796, 0, 5348, 2560)));
         // Taskbar on top (work area starts at 60): centring in the work area would start at
         // 30, which is fine over the taskbar.
         let work_top = Rect::new(0, 60, 6144, 2560);
         assert_eq!(tall.place(work_top, MONITOR).map(|r| r.top), Ok(0));
-        let short = GamingZone { size: px(1920, 1080), x: Position::Px(0), y: Position::Px(-40) };
+        let short = GamingZone::new(px(1920, 1080), Position::Px(0), Position::Px(-40));
         assert_eq!(short.place(work_top, MONITOR).map(|r| r.top), Ok(20));
         assert_eq!(short.place(work_top, work_top).map(|r| r.top), Ok(60));
     }

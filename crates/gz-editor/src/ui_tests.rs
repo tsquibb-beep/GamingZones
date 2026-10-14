@@ -2,7 +2,7 @@
 //! a person would, on a made-up 6144×2560 monitor like Tom's. Nothing is saved or shown.
 
 use eframe::egui::{Key, Modifiers, Vec2};
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use gz_core::edit;
 use gz_core::layout::{Axis, Layout};
@@ -112,45 +112,70 @@ fn thirds_with_a_locked_zone() {
 }
 
 #[test]
-fn locked_zones_refuse_other_edits() {
+fn locked_zones_are_pushed() {
+    // Tom: lock a zone, resize its neighbour, and the locked zone is pushed into the next one.
     let mut h = harness(three_columns());
-    h.state_mut().set_locked(0, true);
+    select(&mut h, Selection::Zones(vec![1]));
+    h.get_by_label("🔒 Lock size").click();
+    h.run_steps(2);
+    assert!(h.state().is_locked(1));
+    // Its own size boxes are off while it's locked.
+    assert!(h.get_by_label("Width").accesskit_node().is_disabled());
+    select(&mut h, Selection::Zones(vec![0]));
+    type_into(&mut h, "% of the width", "33", true);
+    assert_eq!(widths(&h), [2028, 2000, 2116]);
+    // Dragging the divider the other way pulls it back.
     h.state_mut().move_divider("g1", 1500);
     h.run_steps(2);
-    assert_eq!(widths(&h), [2000, 2000, 2144]);
+    assert_eq!(widths(&h), [1500, 2000, 2644]);
+    assert_eq!(h.state().status(), None);
+    // A locked zone against the screen's edge has nowhere to go.
+    h.state_mut().set_locked(0, true);
+    h.state_mut().move_divider("g1", 1700);
+    h.run_steps(2);
+    assert_eq!(widths(&h), [1500, 2000, 2644]);
     let (text, error) = h.state().status().cloned().unwrap();
-    assert!(error && text.contains("zone 1, which is locked"), "{text}");
-    // Moving the other divider is fine.
-    h.state_mut().move_divider("g2", 4100);
-    assert_eq!(widths(&h), [2000, 2100, 2044]);
+    assert!(error && text.contains("Zone 1 is locked"), "{text}");
 }
 
 #[test]
 fn making_a_zone_the_gaming_zone() {
-    // Tom's Slay test: the gaming zone should replace the middle zone, not float over it.
+    // Tom's Slay test: the middle zone and all its space becomes the gaming zone.
     let mut h = harness(three_columns());
     assert!(h.query_by_label("Make zone 2 the gaming zone").is_none());
     select(&mut h, Selection::Zones(vec![1]));
     h.get_by_label("Make zone 2 the gaming zone").click();
     h.run_steps(2);
-    let ed = h.state();
-    let zones = ed.current().resolve(WORK, MONITOR, 0).unwrap();
-    // The middle column (2000..4000, 2000 wide) fits 1920×1080, centred in it.
-    let g = zones.iter().find(|z| z.gaming).unwrap().rect;
-    assert_eq!(g, Rect::new(2040, 710, 3960, 1790));
-    // The columns either side now meet it; strips fill above and below.
-    assert_eq!(zones[0].rect, Rect::new(0, 0, 2040, 2500));
-    assert_eq!(zones[1].rect, Rect::new(2040, 0, 3960, 710));
-    assert_eq!(zones[2].rect, Rect::new(2040, 1790, 3960, 2500));
-    assert_eq!(zones[3].rect, Rect::new(3960, 0, 6144, 2500));
-    assert_eq!(ed.selection, Selection::Gaming);
+    let rects = |h: &Harness<'_, Editor>| -> Vec<Rect> {
+        h.state().current().resolve(WORK, MONITOR, 0).unwrap().iter().map(|z| z.rect).collect()
+    };
+    let r = rects(&h);
+    assert_eq!(r.last(), Some(&Rect::new(2000, 0, 4000, 2500)));
+    assert_eq!((r[0], r[5]), (Rect::new(0, 0, 2000, 2500), Rect::new(4000, 0, 6144, 2500)));
+    assert_eq!(h.state().selection, Selection::Gaming);
+    // The other columns are zones 1 and 2.
+    assert_eq!((h.state().zone_name(0), h.state().zone_name(5)), ("1".into(), "2".into()));
 
-    // And back: a normal zone where it was, nothing else moves.
+    // A preset size: the rest of the column becomes zones around it.
+    h.get_by_value("Presets").click();
+    h.run_steps(2);
+    h.get_by_label("1920 × 1080").click();
+    h.run_steps(2);
+    let r = rects(&h);
+    assert_eq!(r[6], Rect::new(2040, 710, 3960, 1790));
+    assert_eq!(r[1], Rect::new(2000, 0, 4000, 710)); // above
+    assert_eq!(r[2], Rect::new(2000, 710, 2040, 1790)); // left
+    assert_eq!(r[3], Rect::new(3960, 710, 4000, 1790)); // right
+    assert_eq!(r[4], Rect::new(2000, 1790, 4000, 2500)); // below
+    h.get_by_label("Its space: 2000 × 2500 at (2000, 0). What it doesn't cover is normal zones.");
+
+    // Back to filling its space, then back to a normal zone: the original layout.
+    h.get_by_label("Fill its space").click();
+    h.run_steps(2);
+    assert_eq!(rects(&h)[6], Rect::new(2000, 0, 4000, 2500));
     h.get_by_label("Turn it back into a normal zone").click();
     h.run_steps(2);
-    let zones = h.state().current().resolve(WORK, MONITOR, 0).unwrap();
-    assert!(zones.iter().all(|z| !z.gaming));
-    assert_eq!(zones.last().unwrap().rect, g);
+    assert_eq!(*h.state().current(), three_columns());
 }
 
 #[test]

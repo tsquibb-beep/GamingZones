@@ -7,7 +7,7 @@ use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText, Sense, Vec2};
 use gz_core::config::{Settings, SETTINGS_FILE};
 use gz_core::edit::{self, EditError, GuideKind};
 use gz_core::ipc::Preview;
-use gz_core::layout::{span, Anchor, Axis, Layout, Zone};
+use gz_core::layout::{span, zone_number, Anchor, Axis, Layout, Zone};
 use gz_core::store::{Applied, LayoutsFile, MonitorEntry};
 use gz_core::Rect;
 use gz_win::Hwnd;
@@ -171,6 +171,24 @@ impl Editor {
         self.status.as_ref()
     }
 
+    /// Zone `i`'s number as the canvas shows it (empty zones have none).
+    pub fn zone_name(&self, i: usize) -> String {
+        let (work, monitor) = self.areas();
+        let zones = self.current().resolve(work, monitor, 0).unwrap_or_default();
+        zone_number(&zones, i).map_or_else(|| format!("{}", i + 1), |n| n.to_string())
+    }
+
+    /// An edit error as the editor shows it (zone numbers as on the canvas).
+    fn describe(&self, e: &EditError) -> String {
+        match e {
+            EditError::Locked(i) => {
+                format!("Zone {} is locked, and there's nothing on its other side to push it into.", self.zone_name(*i))
+            }
+            EditError::NoSuchZone(i) => format!("There is no zone {}.", self.zone_name(*i)),
+            e => e.to_string(),
+        }
+    }
+
     /// Indices of the selected layout's locked zones.
     pub fn locked_indices(&self) -> Vec<usize> {
         let layout = self.current();
@@ -226,7 +244,8 @@ impl Editor {
             for (zone, size) in &locked_before {
                 let now = after.iter().find(|(z, _)| z == zone).map(|(_, s)| *s);
                 if now.is_some_and(|now| now != *size) {
-                    let n = layout.zones.iter().position(|z| z == zone).map_or(0, |i| i + 1);
+                    let i = layout.zones.iter().position(|z| z == zone).unwrap_or(0);
+                    let n = self.zone_name(i);
                     return Err(format!("That would resize zone {n}, which is locked."));
                 }
             }
@@ -253,7 +272,18 @@ impl Editor {
     ) -> Option<T> {
         let (work, monitor) = self.areas();
         let i = self.layout;
-        self.change(key, |d| f(&mut d.layouts.layouts[i], work, monitor).map_err(|e| e.to_string()))
+        let mut error = None;
+        let result = self.change(key, |d| {
+            f(&mut d.layouts.layouts[i], work, monitor).map_err(|e| {
+                error = Some(e);
+                String::new()
+            })
+        });
+        if let Some(e) = error {
+            let text = self.describe(&e);
+            self.set_error(text);
+        }
+        result
     }
 
     fn record(&mut self, key: &str, before: Doc) {
@@ -293,12 +323,23 @@ impl Editor {
         self.canvas_drag = None;
     }
 
-    /// Moves a divider, within the limits that keep its zones at least [`MIN_ZONE_PX`].
+    /// Moves a divider, within the limits that keep its zones at least [`MIN_ZONE_PX`]. Locked
+    /// zones beside it are pushed along.
     pub fn move_divider(&mut self, id: &str, pos: i32) {
         let (work, monitor) = self.areas();
         let Ok(positions) = self.current().guide_positions(work, monitor) else { return };
-        let (lo, hi) = edit::guide_limits(self.current(), &positions, id, work, MIN_ZONE_PX);
-        self.edit_layout(&format!("divider:{id}"), |l, w, m| edit::move_divider(l, id, pos.clamp(lo, hi), w, m));
+        let locked = self.locked_indices();
+        if positions.get(id).is_some_and(|&(_, at)| at != pos) {
+            if let Err(e) = edit::pushed_guides(self.current(), id, &locked) {
+                let text = self.describe(&e);
+                self.set_error(text);
+                return;
+            }
+        }
+        let (lo, hi) = edit::guide_limits(self.current(), &positions, id, &locked, work, MIN_ZONE_PX);
+        self.edit_layout(&format!("divider:{id}"), |l, w, m| {
+            edit::move_divider(l, id, pos.clamp(lo, hi), &locked, w, m)
+        });
     }
 
     fn delete_selected_zones(&mut self) {
@@ -700,17 +741,33 @@ impl Editor {
             self.selection = Selection::None;
             return;
         };
+        let name = self.zone_name(i);
+        let locked = self.is_locked(i);
         ui.horizontal(|ui| {
-            ui.heading(format!("Zone {}", i + 1));
-            let mut lock = self.is_locked(i);
+            ui.heading(format!("Zone {name}"));
+            let mut lock = locked;
             if ui
                 .toggle_value(&mut lock, "🔒 Lock size")
-                .on_hover_text("While locked, no other edit can change this zone's size.")
+                .on_hover_text("Keeps its size: moving a divider next to it pushes it along instead.")
                 .changed()
             {
                 self.set_locked(i, lock);
             }
         });
+        ui.add_enabled_ui(!locked, |ui| self.zone_size_boxes(ui, i, r, work));
+        if locked {
+            ui.weak("Unlock it to change its size.");
+        }
+        ui.weak(format!("Top-left corner at ({}, {})", r.left - work.left, r.top - work.top));
+        ui.horizontal(|ui| {
+            if ui.button("Delete").on_hover_text("Delete key").clicked() {
+                self.delete_selected_zones();
+            }
+        });
+    }
+
+    /// Zone `i`'s width and height, in px and % of the area.
+    fn zone_size_boxes(&mut self, ui: &mut egui::Ui, i: usize, r: Rect, work: Rect) {
         for (axis, label, size, len) in [
             (Axis::Vertical, "width", r.width(), work.width()),
             (Axis::Horizontal, "height", r.height(), work.height()),
@@ -729,12 +786,6 @@ impl Editor {
                 self.resize_zone(i, axis, (len as f64 * percent / 100.0).round() as i32);
             }
         }
-        ui.weak(format!("Top-left corner at ({}, {})", r.left - work.left, r.top - work.top));
-        ui.horizontal(|ui| {
-            if ui.button("Delete").on_hover_text("Delete key").clicked() {
-                self.delete_selected_zones();
-            }
-        });
     }
 
     fn divider_props(&mut self, ui: &mut egui::Ui, id: &str) {
@@ -944,8 +995,9 @@ fn help(ui: &mut egui::Ui) {
             "Click a zone to split it. Hold Shift to split it the other way.",
             "Drag a divider to move it. Click it to type an exact position.",
             "Ctrl+click zones, or drag across them, to select them. Then Merge or Delete.",
-            "Select a zone to type its exact width or height; lock zones you don't want to change.",
-            "Drag the gaming zone to move it.",
+            "Select a zone to type its exact width or height. Lock a zone to keep its size: dividers next to it push it along.",
+            "Select a zone and make it the gaming zone. Make the gaming zone smaller and the rest of that space becomes zones.",
+            "Drag the gaming zone to move it within its space.",
             "Ctrl+Z / Ctrl+Y undo and redo. Ctrl+S saves.",
         ] {
             ui.label(format!("• {line}"));
