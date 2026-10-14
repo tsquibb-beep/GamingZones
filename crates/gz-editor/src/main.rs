@@ -13,6 +13,8 @@ mod core_link;
 mod doc;
 mod gaming;
 mod monitors;
+#[cfg(test)]
+mod ui_tests;
 
 use eframe::egui;
 use gz_win::instance::SingleInstance;

@@ -262,7 +262,8 @@ impl Editor {
             };
             painter.rect_filled(r, 3.0, fill);
             painter.rect_stroke(r, 3.0, Stroke::new(1.0, ZONE_STROKE), StrokeKind::Inside);
-            let size = format!("{} × {}", z.rect.width(), z.rect.height());
+            let lock = if self.is_locked(i) { "🔒 " } else { "" };
+            let size = format!("{lock}{} × {}", z.rect.width(), z.rect.height());
             label(&painter, r, &(i + 1).to_string(), &size, if z.disabled { TEXT_WEAK } else { TEXT });
         }
         if let Some(g) = zones.get(normal) {

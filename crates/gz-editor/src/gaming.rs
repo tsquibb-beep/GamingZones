@@ -5,7 +5,7 @@ use eframe::egui::{self, RichText};
 use gz_core::edit;
 use gz_core::gaming::{gcd, largest_aspect_step, Align, GamingSize, GamingZone, Position};
 
-use crate::app::{Dialog, Editor};
+use crate::app::{Dialog, Editor, Selection};
 use crate::capture;
 
 const PIXEL_PRESETS: [(u32, u32); 5] = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160)];
@@ -40,11 +40,24 @@ fn convert(size: GamingSize, to: Mode) -> GamingSize {
     }
 }
 
+/// A size box: typed values apply on Enter, not on every keystroke.
 fn number(ui: &mut egui::Ui, value: &mut u32, max: u32) -> bool {
-    ui.add(egui::DragValue::new(value).range(1..=max)).changed()
+    ui.add(egui::DragValue::new(value).range(1..=max).update_while_editing(false)).changed()
 }
 
 impl Editor {
+    /// A size for a new gaming zone in zone `i`: the largest preset that fits, or the zone's size.
+    fn fitting_size(&self, i: usize) -> GamingSize {
+        let (work, monitor) = self.areas();
+        let r = self.current().resolve(work, monitor, 0).ok().and_then(|z| z.get(i).map(|z| z.rect)).unwrap_or(work);
+        PIXEL_PRESETS
+            .iter()
+            .rev()
+            .find(|&&(w, h)| w as i32 <= r.width() && h as i32 <= r.height())
+            .map(|&(w, h)| GamingSize::Pixels { w, h })
+            .unwrap_or(GamingSize::Pixels { w: r.width().max(1) as u32, h: r.height().max(1) as u32 })
+    }
+
     pub fn set_gaming_size(&mut self, w: u32, h: u32) {
         self.edit_layout("", |l, _, _| {
             if let Some(gz) = l.gaming_zones.first_mut() {
@@ -56,27 +69,25 @@ impl Editor {
 
     pub fn gaming_panel(&mut self, ui: &mut egui::Ui) {
         let (work, monitor) = self.areas();
-        let mut on = !self.current().gaming_zones.is_empty();
-        ui.horizontal(|ui| {
-            ui.heading("Gaming zone");
-            if ui.checkbox(&mut on, "").changed() {
-                if on {
-                    self.edit_layout("", |l, _, _| {
-                        edit::add_gaming_zone(l, GamingSize::Pixels { w: 1920, h: 1080 });
-                        // A fresh layout: put zones round it straight away.
-                        if l.zones.len() <= 1 && l.guides.is_empty() {
-                            edit::arrange_around_gaming_zone(l)?;
-                        }
-                        Ok(())
-                    });
-                } else {
-                    self.edit_layout("", edit::remove_gaming_zone);
-                }
-                self.selection = crate::app::Selection::None;
-            }
-        });
+        ui.heading("Gaming zone");
         let Some(gz) = self.current().gaming_zones.first().copied() else {
-            ui.weak("A zone of an exact size (a game's resolution) that the other zones are arranged around.");
+            ui.weak("A zone of an exact size (a game's resolution). The zones beside it line up with its edges.");
+            let single = match &self.selection {
+                Selection::Zones(v) if v.len() == 1 => Some(v[0]),
+                _ => None,
+            };
+            let text = single
+                .map_or("Make a zone the gaming zone".to_string(), |i| format!("Make zone {} the gaming zone", i + 1));
+            if ui.add_enabled(single.is_some(), egui::Button::new(text)).clicked() {
+                let i = single.expect("button enabled");
+                let size = self.fitting_size(i);
+                if self.edit_layout("", |l, w, m| edit::make_gaming_zone(l, i, size, w, m)).is_some() {
+                    self.selection = Selection::Gaming;
+                }
+            }
+            if single.is_none() {
+                ui.weak("Select one zone on the canvas first.");
+            }
             return;
         };
         let over_taskbar = self.current().gaming_over_taskbar;
@@ -172,7 +183,7 @@ impl Editor {
                 let mut centred = matches!(pos, Position::Align(Align::Centre));
                 match pos {
                     Position::Px(px) => {
-                        ui.add(egui::DragValue::new(px).suffix(" px"));
+                        ui.add(egui::DragValue::new(px).suffix(" px").update_while_editing(false));
                     }
                     Position::Align(_) => {
                         ui.weak(format!("{current} px"));
@@ -241,7 +252,15 @@ impl Editor {
             .clicked()
         {
             self.edit_layout("", |l, _, _| edit::arrange_around_gaming_zone(l));
-            self.selection = crate::app::Selection::None;
+            self.selection = Selection::None;
+        }
+        if ui
+            .button("Turn it back into a normal zone")
+            .on_hover_text("The zones around it stay where they are.")
+            .clicked()
+        {
+            self.edit_layout("", edit::remove_gaming_zone);
+            self.selection = Selection::None;
         }
     }
 }

@@ -7,7 +7,7 @@ use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText, Sense, Vec2};
 use gz_core::config::{Settings, SETTINGS_FILE};
 use gz_core::edit::{self, EditError, GuideKind};
 use gz_core::ipc::Preview;
-use gz_core::layout::{span, Anchor, Axis, Layout};
+use gz_core::layout::{span, Anchor, Axis, Layout, Zone};
 use gz_core::store::{Applied, LayoutsFile, MonitorEntry};
 use gz_core::Rect;
 use gz_win::Hwnd;
@@ -63,25 +63,38 @@ pub struct Editor {
     pub dialog: Option<Dialog>,
     allow_close: bool,
     close_after_save: bool,
+    /// Zones whose size edits mustn't change: (layout id, the zone). Only while the editor is open.
+    locked: Vec<(String, Zone)>,
 }
 
 impl Editor {
     pub fn load(dir: PathBuf) -> Editor {
         let files = Files { dir };
         let monitors = monitors::all();
-        let (doc, stamps, mut load_error) = match files.load(&monitors) {
+        let (doc, stamps, load_error) = match files.load(&monitors) {
             Ok((doc, stamps)) => (doc, stamps, None),
             Err(e) => {
                 (Doc { layouts: LayoutsFile::defaults(), applied: Applied::default() }, Stamps::default(), Some(e))
             }
         };
-        if monitors.is_empty() {
-            load_error = Some("No monitors were found.".into());
-        }
         let settings = std::fs::read_to_string(files.dir.join(SETTINGS_FILE))
             .ok()
             .and_then(|t| Settings::from_json(&t).ok())
             .unwrap_or_default();
+        Editor::new(files, monitors, doc, stamps, load_error, settings.snapping.deadzone_px)
+    }
+
+    fn new(
+        files: Files,
+        monitors: Vec<Monitor>,
+        doc: Doc,
+        stamps: Stamps,
+        mut load_error: Option<String>,
+        deadzone: i32,
+    ) -> Editor {
+        if monitors.is_empty() {
+            load_error = Some("No monitors were found.".into());
+        }
         let monitor = monitors.iter().position(|m| m.info.primary).unwrap_or(0);
         let mut editor = Editor {
             files,
@@ -98,7 +111,7 @@ impl Editor {
             layout: 0,
             selection: Selection::None,
             canvas_drag: None,
-            deadzone: settings.snapping.deadzone_px,
+            deadzone,
             preview_on: false,
             last_preview: None,
             own_window: None,
@@ -106,9 +119,18 @@ impl Editor {
             dialog: None,
             allow_close: false,
             close_after_save: false,
+            locked: Vec::new(),
         };
         editor.select_applied_layout();
         editor
+    }
+
+    /// An editor on made-up monitors and layouts, for the UI tests (never saves).
+    #[cfg(test)]
+    pub fn for_test(monitors: Vec<Monitor>, layouts: LayoutsFile, deadzone: i32) -> Editor {
+        let applied = Applied { default_layout: layouts.layouts.first().map(|l| l.id.clone()), ..Default::default() };
+        let files = Files { dir: std::env::temp_dir().join("gz-editor-test-never-written") };
+        Editor::new(files, monitors, Doc { layouts, applied }, Stamps::default(), None, deadzone)
     }
 
     pub fn current(&self) -> &Layout {
@@ -143,16 +165,72 @@ impl Editor {
         self.status = Some((text.into(), true));
     }
 
+    /// The status line: (text, is it an error).
+    #[cfg(test)]
+    pub fn status(&self) -> Option<&(String, bool)> {
+        self.status.as_ref()
+    }
+
+    /// Indices of the selected layout's locked zones.
+    pub fn locked_indices(&self) -> Vec<usize> {
+        let layout = self.current();
+        (0..layout.zones.len()).filter(|&i| self.is_locked(i)).collect()
+    }
+
+    pub fn is_locked(&self, index: usize) -> bool {
+        let layout = self.current();
+        layout.zones.get(index).is_some_and(|z| self.locked.iter().any(|(id, l)| *id == layout.id && l == z))
+    }
+
+    pub fn set_locked(&mut self, index: usize, lock: bool) {
+        let layout = self.current();
+        let Some(zone) = layout.zones.get(index).cloned() else { return };
+        let id = layout.id.clone();
+        self.locked.retain(|(l, z)| !(*l == id && *z == zone));
+        if lock {
+            self.locked.push((id, zone));
+        }
+    }
+
+    /// The selected layout's locked zones in `doc`, with their size on this monitor.
+    fn locked_sizes(&self, doc: &Doc) -> Vec<(Zone, (i32, i32))> {
+        let (work, monitor) = self.areas();
+        let Some(layout) = doc.layouts.layouts.get(self.layout) else { return Vec::new() };
+        let Ok(zones) = layout.resolve(work, monitor, 0) else { return Vec::new() };
+        layout
+            .zones
+            .iter()
+            .zip(&zones)
+            .filter(|(z, _)| self.locked.iter().any(|(id, l)| *id == layout.id && l == *z))
+            .map(|(z, r)| (z.clone(), (r.rect.width(), r.rect.height())))
+            .collect()
+    }
+
     /// Changes the document as one undo step, or as part of the previous step if it has the
     /// same non-empty `key` and came within a second. If the change fails, or leaves a
     /// layout invalid, nothing changes and the error is shown.
     pub fn change<T>(&mut self, key: &str, f: impl FnOnce(&mut Doc) -> Result<T, String>) -> Option<T> {
         let before = self.doc.clone();
+        let locked_before = self.locked_sizes(&before);
         let result = f(&mut self.doc).and_then(|v| {
             match self.doc.layouts.layouts.iter().find_map(|l| l.validate().err().map(|e| (l.name.clone(), e))) {
                 Some((name, e)) => Err(format!("{name}: {e}")),
                 None => Ok(v),
             }
+        });
+        // Locked zones keep their size, whatever the change (a zone that no longer exists,
+        // after a merge or delete, isn't checked).
+        let result = result.and_then(|v| {
+            let after = self.locked_sizes(&self.doc);
+            let layout = &self.doc.layouts.layouts[self.layout.min(self.doc.layouts.layouts.len() - 1)];
+            for (zone, size) in &locked_before {
+                let now = after.iter().find(|(z, _)| z == zone).map(|(_, s)| *s);
+                if now.is_some_and(|now| now != *size) {
+                    let n = layout.zones.iter().position(|z| z == zone).map_or(0, |i| i + 1);
+                    return Err(format!("That would resize zone {n}, which is locked."));
+                }
+            }
+            Ok(v)
         });
         match result {
             Ok(v) => {
@@ -220,7 +298,7 @@ impl Editor {
         let (work, monitor) = self.areas();
         let Ok(positions) = self.current().guide_positions(work, monitor) else { return };
         let (lo, hi) = edit::guide_limits(self.current(), &positions, id, work, MIN_ZONE_PX);
-        self.edit_layout(&format!("divider:{id}"), |l, w, m| edit::move_guide(l, id, pos.clamp(lo, hi), w, m));
+        self.edit_layout(&format!("divider:{id}"), |l, w, m| edit::move_divider(l, id, pos.clamp(lo, hi), w, m));
     }
 
     fn delete_selected_zones(&mut self) {
@@ -295,20 +373,20 @@ impl Editor {
 
     /// Monitors (connected or remembered in applied.json) whose entry uses layout `id`.
     fn used_on(&self, id: &str) -> Vec<String> {
-        self.doc
-            .applied
+        let applied = &self.doc.applied;
+        // Connected monitors, including those on the default layout (no entry of their own).
+        let connected = self
             .monitors
             .iter()
-            .filter(|(_, e)| e.layout.as_deref() == Some(id))
-            .map(|(mid, e)| {
-                let n = self.monitors.iter().position(|m| &m.id == mid);
-                match n {
-                    Some(n) => self.monitors[n].label(n),
-                    None if !e.name.is_empty() => format!("{} (not connected)", e.name),
-                    None => format!("{mid} (not connected)"),
-                }
-            })
-            .collect()
+            .enumerate()
+            .filter(|(_, m)| applied.layout_for(&m.id) == Some(id))
+            .map(|(n, m)| m.label(n));
+        let remembered = applied
+            .monitors
+            .iter()
+            .filter(|(mid, e)| e.layout.as_deref() == Some(id) && !self.monitors.iter().any(|m| &m.id == *mid))
+            .map(|(mid, e)| format!("{} (not connected)", if e.name.is_empty() { mid } else { &e.name }));
+        connected.chain(remembered).collect()
     }
 
     fn delete_layout(&mut self, i: usize) {
@@ -585,21 +663,11 @@ impl Editor {
 
     fn selection_props(&mut self, ui: &mut egui::Ui) {
         match self.selection.clone() {
+            Selection::Zones(v) if v.len() == 1 => self.zone_props(ui, v[0]),
             Selection::Zones(v) if !v.is_empty() => {
-                let (work, monitor) = self.areas();
-                if v.len() == 1 {
-                    ui.heading(format!("Zone {}", v[0] + 1));
-                    if let Ok(zones) = self.current().resolve(work, monitor, self.deadzone) {
-                        if let Some(z) = zones.get(v[0]) {
-                            let r = z.rect.offset(-work.left, -work.top);
-                            ui.label(format!("{} × {} at ({}, {})", r.width(), r.height(), r.left, r.top));
-                        }
-                    }
-                } else {
-                    ui.heading(format!("{} zones", v.len()));
-                }
+                ui.heading(format!("{} zones", v.len()));
                 ui.horizontal(|ui| {
-                    if v.len() > 1 && ui.button("Merge").clicked() {
+                    if ui.button("Merge").clicked() {
                         if let Some(i) = self.edit_layout("", |l, w, m| edit::merge(l, &v, w, m)) {
                             self.selection = Selection::Zones(vec![i]);
                         }
@@ -610,10 +678,63 @@ impl Editor {
                 });
             }
             Selection::Divider(id) => self.divider_props(ui, &id),
+            Selection::Gaming => {
+                ui.weak("The gaming zone: its size and position are below.");
+            }
             _ => {
-                ui.weak("Select zones or a divider to change them.");
+                ui.weak("Select a zone or a divider to change it.");
             }
         }
+    }
+
+    /// Makes zone `i` `size` px wide or tall, keeping locked zones as they are.
+    pub fn resize_zone(&mut self, i: usize, axis: Axis, size: i32) {
+        let locked = self.locked_indices();
+        self.edit_layout(&format!("zone-size:{i}"), |l, w, m| edit::resize_zone(l, i, axis, size, &locked, w, m));
+    }
+
+    fn zone_props(&mut self, ui: &mut egui::Ui, i: usize) {
+        let (work, monitor) = self.areas();
+        let Some(r) = self.current().resolve(work, monitor, self.deadzone).ok().and_then(|z| z.get(i).map(|z| z.rect))
+        else {
+            self.selection = Selection::None;
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.heading(format!("Zone {}", i + 1));
+            let mut lock = self.is_locked(i);
+            if ui
+                .toggle_value(&mut lock, "🔒 Lock size")
+                .on_hover_text("While locked, no other edit can change this zone's size.")
+                .changed()
+            {
+                self.set_locked(i, lock);
+            }
+        });
+        for (axis, label, size, len) in [
+            (Axis::Vertical, "width", r.width(), work.width()),
+            (Axis::Horizontal, "height", r.height(), work.height()),
+        ] {
+            let len = len.max(1);
+            let mut px = size;
+            let title = if axis == Axis::Vertical { "Width" } else { "Height" };
+            if number_box(ui, title, &mut px, |d| d.range(MIN_ZONE_PX..=len).suffix(" px")) {
+                self.resize_zone(i, axis, px);
+            }
+            let mut percent = size as f64 * 100.0 / len as f64;
+            let pct_label = format!("% of the {label}");
+            if number_box(ui, &pct_label, &mut percent, |d| {
+                d.range(0.0..=100.0).speed(0.05).max_decimals(3).suffix(" %")
+            }) {
+                self.resize_zone(i, axis, (len as f64 * percent / 100.0).round() as i32);
+            }
+        }
+        ui.weak(format!("Top-left corner at ({}, {})", r.left - work.left, r.top - work.top));
+        ui.horizontal(|ui| {
+            if ui.button("Delete").on_hover_text("Delete key").clicked() {
+                self.delete_selected_zones();
+            }
+        });
     }
 
     fn divider_props(&mut self, ui: &mut egui::Ui, id: &str) {
@@ -634,22 +755,14 @@ impl Editor {
         ui.heading("Divider");
         ui.label(RichText::new(format!("\"{id}\", {}", guide.axis.name())).weak());
         let mut px = pos - start;
-        ui.horizontal(|ui| {
-            ui.label("Position");
-            if ui.add(egui::DragValue::new(&mut px).range(0..=len).suffix(" px")).changed() {
-                self.move_divider(id, start + px);
-            }
-            ui.label(format!("from the {edge}"));
-        });
+        if number_box(ui, &format!("From the {edge}"), &mut px, |d| d.range(0..=len).suffix(" px")) {
+            self.move_divider(id, start + px);
+        }
         let mut percent = (pos - start) as f64 * 100.0 / len as f64;
-        ui.horizontal(|ui| {
-            ui.label("Position");
-            let drag = egui::DragValue::new(&mut percent).range(0.0..=100.0).speed(0.05).max_decimals(3).suffix(" %");
-            if ui.add(drag).changed() {
-                self.move_divider(id, start + (len as f64 * percent / 100.0).round() as i32);
-            }
-            ui.label(format!("of the {dimension}"));
-        });
+        let pct_label = format!("% of the {dimension}");
+        if number_box(ui, &pct_label, &mut percent, |d| d.range(0.0..=100.0).speed(0.05).max_decimals(3).suffix(" %")) {
+            self.move_divider(id, start + (len as f64 * percent / 100.0).round() as i32);
+        }
         let kind = match &guide.anchor {
             Anchor::Px(px) => format!("Fixed: {px} px from the {edge} on every monitor."),
             Anchor::Percent(p) => format!("{p} % of the {dimension} on every monitor."),
@@ -661,18 +774,14 @@ impl Editor {
         ui.label(kind);
         if let Anchor::Between { fraction, .. } = guide.anchor {
             let mut f = fraction;
-            ui.horizontal(|ui| {
-                ui.label("Fraction");
-                let drag = egui::DragValue::new(&mut f).range(0.0..=1.0).speed(0.001).max_decimals(4);
-                if ui.add(drag).changed() {
-                    self.edit_layout(&format!("divider:{id}"), |l, _, _| {
-                        if let Anchor::Between { fraction, .. } = &mut edit::guide_mut(l, id)?.anchor {
-                            *fraction = f;
-                        }
-                        Ok(())
-                    });
-                }
-            });
+            if number_box(ui, "Fraction", &mut f, |d| d.range(0.0..=1.0).speed(0.001).max_decimals(4)) {
+                self.edit_layout(&format!("divider:{id}"), |l, _, _| {
+                    if let Anchor::Between { fraction, .. } = &mut edit::guide_mut(l, id)?.anchor {
+                        *fraction = f;
+                    }
+                    Ok(())
+                });
+            }
         }
         ui.horizontal(|ui| {
             if !matches!(guide.anchor, Anchor::Px(_)) && ui.button("Make it fixed px").clicked() {
@@ -813,12 +922,29 @@ impl Editor {
     }
 }
 
+/// A labelled number box. Typed values apply on Enter (or when the box loses focus), not on
+/// every keystroke, so typing "79" doesn't first apply "7". Dragging still applies live.
+pub fn number_box<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut N,
+    setup: impl FnOnce(egui::DragValue<'_>) -> egui::DragValue<'_>,
+) -> bool {
+    ui.horizontal(|ui| {
+        let label = ui.add_sized([110.0, 18.0], egui::Label::new(label));
+        let drag = setup(egui::DragValue::new(value).update_while_editing(false));
+        ui.add(drag).labelled_by(label.id).changed()
+    })
+    .inner
+}
+
 fn help(ui: &mut egui::Ui) {
     egui::CollapsingHeader::new("How to edit").default_open(true).show(ui, |ui| {
         for line in [
             "Click a zone to split it. Hold Shift to split it the other way.",
             "Drag a divider to move it. Click it to type an exact position.",
             "Ctrl+click zones, or drag across them, to select them. Then Merge or Delete.",
+            "Select a zone to type its exact width or height; lock zones you don't want to change.",
             "Drag the gaming zone to move it.",
             "Ctrl+Z / Ctrl+Y undo and redo. Ctrl+S saves.",
         ] {
@@ -829,6 +955,19 @@ fn help(ui: &mut egui::Ui) {
 
 impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.show(ui);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let (Some(me), Some(_)) = (self.own_window, &self.last_preview) {
+            core_link::preview(me, None);
+        }
+    }
+}
+
+impl Editor {
+    /// The whole window (also driven directly by the UI tests).
+    pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
         if let Some(error) = self.load_error.clone() {
@@ -845,11 +984,8 @@ impl eframe::App for Editor {
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.dialogs(&ctx);
         self.sync_preview();
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let (Some(me), Some(_)) = (self.own_window, &self.last_preview) {
-            core_link::preview(me, None);
-        }
+        // Forget locks on zones that no longer exist (split, merged, deleted).
+        let layouts = &self.doc.layouts.layouts;
+        self.locked.retain(|(id, z)| layouts.iter().any(|l| l.id == *id && l.zones.contains(z)));
     }
 }

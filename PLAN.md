@@ -267,6 +267,17 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
 - gz-editor uses eframe 0.36 with the glow (OpenGL) backend only: 6.2 MB exe, ~140 MB while open (mostly the GL
   driver). The tray app's memory was 1.67 MB before and after the editor ran.
 
+**Changes after Tom's first test (2026-10-14):**
+- Number boxes apply on Enter, not per keystroke (typing "79" applied "7" first, clamped, then went wrong).
+- Select a zone to type its width/height (px or %); "Lock size" keeps a zone's size through every other edit.
+- Moving a divider by hand leaves every other divider where it is (proportional splits used to follow it).
+- "Make zone N the gaming zone" replaces that zone: the zones beside it meet its edges, strips fill above and below.
+  (Adding a gaming zone floating over the zones is gone.) "Turn it back into a normal zone" leaves a zone in its place.
+- Editor icon: the tray icon's shape with a blue gaming zone.
+- A monitor on the default layout counts as using it (deleting that layout is refused).
+- Testing (agreed 2026-10-14): editor UI tests with egui_kittest (test-only dependency) click and type in the real UI;
+  Tom's checklists only cover what needs a person.
+
 ### Phase 4 — Layout selector, shortcuts, settings
 - [ ] Layout selector popup:
   - hotkey (default ``Win+Shift+` ``, FancyZones' editor key); preview cards; number keys to choose;

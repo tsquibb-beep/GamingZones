@@ -16,3 +16,7 @@ eframe = { version = "0.36.2", default-features = false, features = ["default_fo
 
 [build-dependencies]
 embed-resource.workspace = true
+
+[dev-dependencies]
+# Test-only (agreed 2026-10-14): drives the editor UI headlessly in `cargo test`. Never in the exe.
+egui_kittest = "0.36.2"

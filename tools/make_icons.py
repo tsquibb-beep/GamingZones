@@ -23,12 +23,8 @@ GZ_SHAPES = [
     (0.28, 0.14, 0.72, 0.86, GAME),
     (0.76, 0.14, 0.98, 0.48, SIDE), (0.76, 0.52, 0.98, 0.86, SIDE),
 ]
-# The editor: the same layout with the gaming zone selected (blue), split by a gap.
-EDITOR_SHAPES = [
-    (0.02, 0.14, 0.24, 0.48, SIDE), (0.02, 0.52, 0.24, 0.86, SIDE),
-    (0.28, 0.14, 0.72, 0.47, EDIT), (0.28, 0.53, 0.72, 0.86, EDIT),
-    (0.76, 0.14, 0.98, 0.48, SIDE), (0.76, 0.52, 0.98, 0.86, SIDE),
-]
+# The editor: the tray icon's layout, with the gaming zone in the editor's blue.
+EDITOR_SHAPES = [shape if shape[4] is not GAME else shape[:4] + (EDIT,) for shape in GZ_SHAPES]
 # A ruler with tick marks cut out of its top edge.
 RULER_SHAPES = [(0.02, 0.28, 0.98, 0.72, RULER)]
 RULER_TICKS = [(0.10 + i * 0.1, 0.28, 0.10 + i * 0.1 + 0.035, 0.28 + (0.24 if i % 5 == 0 else 0.14)) for i in range(9)]
