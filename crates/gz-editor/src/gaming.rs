@@ -1,10 +1,9 @@
 //! The gaming zone panel: making a zone the gaming zone (and back), size (pixels, aspect
-//! ratio or integer scale, with presets), position within its space, and "may cover the
-//! taskbar".
+//! ratio or integer scale, with presets), position, and "may cover the taskbar".
 
 use eframe::egui::{self, RichText};
 use gz_core::edit;
-use gz_core::gaming::{gcd, largest_aspect_step, Align, GamingSize, Position};
+use gz_core::gaming::{gcd, largest_aspect_step, Align, GamingSize, GamingZone, Position};
 
 use crate::app::{Dialog, Editor, Selection};
 use crate::capture;
@@ -48,12 +47,27 @@ fn number(ui: &mut egui::Ui, value: &mut u32, max: u32) -> bool {
 
 impl Editor {
     pub fn set_gaming_size(&mut self, w: u32, h: u32) {
-        self.edit_layout("", |l, _, _| {
-            if let Some(gz) = l.gaming_zones.first_mut() {
-                gz.size = GamingSize::Pixels { w, h };
+        let Some(mut new) = self.current().gaming_zones.first().cloned() else { return };
+        new.size = GamingSize::Pixels { w, h };
+        self.apply_gaming(new);
+    }
+
+    /// Changes the gaming zone's size (kept centred where it is) or how it's described. The
+    /// dividers around it stay put unless it grows past them.
+    fn apply_gaming(&mut self, mut new: GamingZone) {
+        let (work, monitor) = self.areas();
+        let Some(old) = self.current().gaming_rects(work, monitor).ok().and_then(|r| r.first().copied()) else {
+            return;
+        };
+        if let Ok((w, h)) = new.size.pixels() {
+            if let Position::Px(_) = new.x {
+                new.x = Position::Px(old.left + (old.width() - w) / 2 - work.left);
             }
-            Ok(())
-        });
+            if let Position::Px(_) = new.y {
+                new.y = Position::Px(old.top + (old.height() - h) / 2 - work.top);
+            }
+        }
+        self.edit_layout("gaming", |l, w, m| edit::set_gaming_zone(l, new, w, m));
     }
 
     pub fn gaming_panel(&mut self, ui: &mut egui::Ui) {
@@ -80,7 +94,8 @@ impl Editor {
             return;
         };
         let over_taskbar = self.current().gaming_over_taskbar;
-        let Ok((space, bounds)) = self.current().gaming_space(0, work, monitor) else { return };
+        let bounds = self.current().gaming_bounds(work, monitor);
+        let space = edit::gaming_space(self.current(), work, monitor).ok().flatten();
         let placed = self.current().gaming_rects(work, monitor).ok().and_then(|r| r.first().copied());
         let mut new = gz.clone();
         let max = gz_core::gaming::MAX_SIZE;
@@ -126,7 +141,7 @@ impl Editor {
             (Ok((w, h)), Some(p)) if (w, h) != (p.width(), p.height()) => {
                 ui.colored_label(
                     egui::Color32::from_rgb(0xFF, 0xB0, 0x20),
-                    format!("= {w} × {h}, bigger than its space: shrunk to {} × {}", p.width(), p.height()),
+                    format!("= {w} × {h}, too big here: shrunk to {} × {}", p.width(), p.height()),
                 );
             }
             (Ok((w, h)), _) => {
@@ -163,89 +178,74 @@ impl Editor {
             if ui.button("Capture size from window…").clicked() {
                 self.dialog = Some(Dialog::Capture(capture::windows()));
             }
-            let fill = (space.width().max(1) as u32, space.height().max(1) as u32);
-            if gz.within.is_some()
-                && ui.button("Fill its space").on_hover_text(format!("{} × {}", fill.0, fill.1)).clicked()
-            {
-                new.size = GamingSize::Pixels { w: fill.0, h: fill.1 };
-                new.x = Position::Align(Align::Centre);
-                new.y = Position::Align(Align::Centre);
-            }
         });
-
-        // Position, within its space.
-        ui.add_space(4.0);
-        if gz.within.is_some() {
-            ui.weak(format!(
-                "Its space: {} × {} at ({}, {}). What it doesn't cover is normal zones.",
-                space.width(),
-                space.height(),
-                space.left - work.left,
-                space.top - work.top
-            ));
+        if new != gz {
+            self.apply_gaming(new);
         }
-        let size = placed.map_or((0, 0), |p| (p.width(), p.height()));
-        let position_row = |ui: &mut egui::Ui, label: &str, pos: &mut Position, current: i32| {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                let mut centred = matches!(pos, Position::Align(Align::Centre));
-                match pos {
-                    Position::Px(px) => {
-                        ui.add(egui::DragValue::new(px).suffix(" px").update_while_editing(false));
-                    }
-                    Position::Align(_) => {
-                        ui.weak(format!("{current} px"));
-                    }
-                }
-                if ui.checkbox(&mut centred, "centred").changed() {
-                    *pos = if centred { Position::Align(Align::Centre) } else { Position::Px(current) };
-                }
-            });
-        };
-        let (cx, cy) = placed.map_or((0, 0), |p| (p.left - space.left, p.top - space.top));
-        position_row(ui, "X", &mut new.x, cx);
-        position_row(ui, "Y", &mut new.y, cy);
-        let px = |v: i32| Position::Px(v);
-        ui.horizontal(|ui| {
-            ui.label("Across");
-            if ui.small_button("Left").clicked() {
-                new.x = px(bounds.left - space.left);
+        if let Some(space) = space {
+            ui.weak(format!(
+                "Its space: {} × {}. What it doesn't cover is normal zones; the dividers around it move with it.",
+                space.width(),
+                space.height()
+            ));
+            if placed.is_some_and(|p| p != space)
+                && ui
+                    .button("Fill its space")
+                    .on_hover_text(format!("Make it {} × {}", space.width(), space.height()))
+                    .clicked()
+            {
+                self.edit_layout("", edit::fill_space);
             }
-            if ui.small_button("Centre").clicked() {
-                new.x = Position::Align(Align::Centre);
-            }
-            if ui.small_button("Right").clicked() {
-                new.x = px(bounds.right - size.0 - space.left);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Down");
-            if ui.small_button("Top").clicked() {
-                new.y = px(bounds.top - space.top);
-            }
-            if ui.small_button("Middle").clicked() {
-                new.y = Position::Align(Align::Centre);
-            }
-            if ui.small_button("Bottom").clicked() {
-                new.y = px(bounds.bottom - size.1 - space.top);
-            }
-        });
+        }
+
+        // Position: moving it pushes the zones beside it, as dragging it does.
+        ui.add_space(4.0);
         if let Some(p) = placed {
+            for (label, axis_x) in [("X", true), ("Y", false)] {
+                let (pos, current, centre) = if axis_x {
+                    (gz.x, p.left - work.left, (work.width() - p.width()).div_euclid(2))
+                } else {
+                    (gz.y, p.top - work.top, (work.height() - p.height()).div_euclid(2))
+                };
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    let mut value = current;
+                    let centred = matches!(pos, Position::Align(Align::Centre));
+                    let changed = ui
+                        .add_enabled(
+                            !centred,
+                            egui::DragValue::new(&mut value).suffix(" px").update_while_editing(false),
+                        )
+                        .changed();
+                    let mut centre_it = centred;
+                    let toggled = ui.checkbox(&mut centre_it, "centred").changed();
+                    let target = if toggled && centre_it { centre } else { value };
+                    if changed || toggled {
+                        let locked = self.locked_indices();
+                        let (dx, dy) = if axis_x { (target - current, 0) } else { (0, target - current) };
+                        self.edit_layout("gaming-move", |l, w, m| {
+                            edit::move_gaming_zone(l, dx, dy, &locked, w, m)?;
+                            let g = &mut l.gaming_zones[0];
+                            let at = if axis_x { &mut g.x } else { &mut g.y };
+                            if centre_it {
+                                *at = Position::Align(Align::Centre);
+                            } else if let Position::Align(_) = at {
+                                *at = Position::Px(target);
+                            }
+                            Ok(())
+                        });
+                    }
+                });
+            }
             let r = p.offset(-work.left, -work.top);
             ui.weak(format!("On this monitor: ({}, {}) to ({}, {})", r.left, r.top, r.right, r.bottom));
-        }
-        if new != gz {
-            self.edit_layout("gaming", |l, _, _| {
-                l.gaming_zones[0] = new;
-                Ok(())
-            });
         }
 
         let mut over = over_taskbar;
         if ui
             .checkbox(&mut over, "May cover the taskbar")
             .on_hover_text(
-                "Where its space reaches the edge of the work area, it may go to the edge of the monitor. The taskbar still draws on top of it for now.",
+                "Lets it be taller or wider than the work area. The taskbar still draws on top of it for now.",
             )
             .changed()
         {
@@ -256,13 +256,13 @@ impl Editor {
         }
         if ui
             .button("Arrange zones around it")
-            .on_hover_text("Replaces this layout's zones with a column either side and a strip above and below; its space becomes the whole screen.")
+            .on_hover_text("Replaces this layout's zones with a column either side and a strip above and below.")
             .clicked()
         {
             self.edit_layout("", |l, _, _| edit::arrange_around_gaming_zone(l));
             self.selection = Selection::None;
         }
-        let back = if gz.within.is_some() {
+        let back = if gz.from_zone {
             "Its space becomes one zone again (the zones in it are merged)."
         } else {
             "The zones around it stay where they are."

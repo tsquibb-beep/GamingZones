@@ -19,7 +19,7 @@ use crate::doc::{Doc, Files, Stamps};
 use crate::monitors::{self, Monitor};
 
 /// Smallest zone (px) a split or divider drag may leave.
-pub const MIN_ZONE_PX: i32 = 10;
+pub const MIN_ZONE_PX: i32 = edit::MIN_ZONE_PX;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Selection {
@@ -185,7 +185,7 @@ impl Editor {
                 format!("Zone {} is locked, and there's nothing on its other side to push it into.", self.zone_name(*i))
             }
             EditError::NoSuchZone(i) => format!("There is no zone {}.", self.zone_name(*i)),
-            e => e.to_string(),
+            e => format!("{}.", capitalise(&e.to_string())),
         }
     }
 
@@ -230,7 +230,16 @@ impl Editor {
     pub fn change<T>(&mut self, key: &str, f: impl FnOnce(&mut Doc) -> Result<T, String>) -> Option<T> {
         let before = self.doc.clone();
         let locked_before = self.locked_sizes(&before);
-        let result = f(&mut self.doc).and_then(|v| {
+        let (work, monitor) = self.areas();
+        let index = self.layout;
+        let result = f(&mut self.doc);
+        // Dividers that only meet by chance (from older edits) are joined once the layout is touched.
+        if let (Ok(_), Some(l)) = (&result, self.doc.layouts.layouts.get_mut(index)) {
+            if before.layouts.layouts.get(index) != Some(l) {
+                edit::join_coincident(l, work, monitor);
+            }
+        }
+        let result = result.and_then(|v| {
             match self.doc.layouts.layouts.iter().find_map(|l| l.validate().err().map(|e| (l.name.clone(), e))) {
                 Some((name, e)) => Err(format!("{name}: {e}")),
                 None => Ok(v),
@@ -248,6 +257,18 @@ impl Editor {
                     let n = self.zone_name(i);
                     return Err(format!("That would resize zone {n}, which is locked."));
                 }
+            }
+            Ok(v)
+        });
+        // Nor may a change leave zones that only meet by chance (they'd come apart when a
+        // divider or the gaming zone moves).
+        let result = result.and_then(|v| {
+            let (work, monitor) = self.areas();
+            let i = self.layout.min(self.doc.layouts.layouts.len() - 1);
+            let (was, now) = (before.layouts.layouts.get(i), &self.doc.layouts.layouts[i]);
+            let whole = |l: &Layout| edit::stays_whole(l, work, monitor);
+            if was != Some(now) && was.is_some_and(whole) && !whole(now) {
+                return Err(format!("{}.", capitalise(&EditError::ComesApart.to_string())));
             }
             Ok(v)
         });
@@ -323,23 +344,11 @@ impl Editor {
         self.canvas_drag = None;
     }
 
-    /// Moves a divider, within the limits that keep its zones at least [`MIN_ZONE_PX`]. Locked
-    /// zones beside it are pushed along.
+    /// Moves a divider as far towards `pos` as it can go (see [`edit::move_divider`]): locked
+    /// zones and the gaming zone beside it are pushed along.
     pub fn move_divider(&mut self, id: &str, pos: i32) {
-        let (work, monitor) = self.areas();
-        let Ok(positions) = self.current().guide_positions(work, monitor) else { return };
         let locked = self.locked_indices();
-        if positions.get(id).is_some_and(|&(_, at)| at != pos) {
-            if let Err(e) = edit::pushed_guides(self.current(), id, &locked) {
-                let text = self.describe(&e);
-                self.set_error(text);
-                return;
-            }
-        }
-        let (lo, hi) = edit::guide_limits(self.current(), &positions, id, &locked, work, MIN_ZONE_PX);
-        self.edit_layout(&format!("divider:{id}"), |l, w, m| {
-            edit::move_divider(l, id, pos.clamp(lo, hi), &locked, w, m)
-        });
+        self.edit_layout(&format!("divider:{id}"), |l, w, m| edit::move_divider(l, id, pos, &locked, w, m));
     }
 
     fn delete_selected_zones(&mut self) {
@@ -973,6 +982,11 @@ impl Editor {
     }
 }
 
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+}
+
 /// A labelled number box. Typed values apply on Enter (or when the box loses focus), not on
 /// every keystroke, so typing "79" doesn't first apply "7". Dragging still applies live.
 pub fn number_box<N: egui::emath::Numeric>(
@@ -997,7 +1011,7 @@ fn help(ui: &mut egui::Ui) {
             "Ctrl+click zones, or drag across them, to select them. Then Merge or Delete.",
             "Select a zone to type its exact width or height. Lock a zone to keep its size: dividers next to it push it along.",
             "Select a zone and make it the gaming zone. Make the gaming zone smaller and the rest of that space becomes zones.",
-            "Drag the gaming zone to move it within its space.",
+            "Drag the gaming zone to move it: the zones beside it make room.",
             "Ctrl+Z / Ctrl+Y undo and redo. Ctrl+S saves.",
         ] {
             ui.label(format!("• {line}"));

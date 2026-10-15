@@ -4,7 +4,6 @@
 
 use eframe::egui::{self, Align2, Color32, CursorIcon, FontId, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use gz_core::edit::{self, Divider};
-use gz_core::gaming::Position;
 use gz_core::layout::{zone_number, Axis, ResolvedZone};
 use gz_core::Rect;
 
@@ -337,22 +336,17 @@ impl Editor {
         }
     }
 
-    /// Moves the gaming zone's top-left corner to (`left`, `top`), kept inside its space.
+    /// Moves the gaming zone's top-left corner towards (`left`, `top`), pushing the zones
+    /// beside it (see [`edit::move_gaming_zone`]).
     pub fn move_gaming_zone(&mut self, left: i32, top: i32) {
         let (work, monitor) = self.areas();
         let Ok(rects) = self.current().gaming_rects(work, monitor) else { return };
         let Some(g) = rects.first().copied() else { return };
-        let Ok((space, bounds)) = self.current().gaming_space(0, work, monitor) else { return };
-        let left = left.clamp(bounds.left, (bounds.right - g.width()).max(bounds.left));
-        let top = top.clamp(bounds.top, (bounds.bottom - g.height()).max(bounds.top));
-        if (left, top) == (g.left, g.top) {
+        let (dx, dy) = (left - g.left, top - g.top);
+        if (dx, dy) == (0, 0) {
             return;
         }
-        self.edit_layout("gaming-move", |l, _, _| {
-            let gz = &mut l.gaming_zones[0];
-            gz.x = Position::Px(left - space.left);
-            gz.y = Position::Px(top - space.top);
-            Ok(())
-        });
+        let locked = self.locked_indices();
+        self.edit_layout("gaming-move", |l, w, m| edit::move_gaming_zone(l, dx, dy, &locked, w, m));
     }
 }

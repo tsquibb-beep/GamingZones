@@ -167,7 +167,9 @@ fn making_a_zone_the_gaming_zone() {
     assert_eq!(r[2], Rect::new(2000, 710, 2040, 1790)); // left
     assert_eq!(r[3], Rect::new(3960, 710, 4000, 1790)); // right
     assert_eq!(r[4], Rect::new(2000, 1790, 4000, 2500)); // below
-    h.get_by_label("Its space: 2000 × 2500 at (2000, 0). What it doesn't cover is normal zones.");
+    h.get_by_label(
+        "Its space: 2000 × 2500. What it doesn't cover is normal zones; the dividers around it move with it.",
+    );
 
     // Back to filling its space, then back to a normal zone: the original layout.
     h.get_by_label("Fill its space").click();
@@ -175,7 +177,31 @@ fn making_a_zone_the_gaming_zone() {
     assert_eq!(rects(&h)[6], Rect::new(2000, 0, 4000, 2500));
     h.get_by_label("Turn it back into a normal zone").click();
     h.run_steps(2);
-    assert_eq!(*h.state().current(), three_columns());
+    assert_eq!(
+        rects(&h),
+        three_columns().resolve(WORK, MONITOR, 0).unwrap().iter().map(|z| z.rect).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_gaming_zone_is_pushed_not_resized() {
+    // Tom: sizing up the zones around it resized it; moving it didn't push its neighbours.
+    let mut h = harness(three_columns());
+    select(&mut h, Selection::Zones(vec![1]));
+    h.get_by_label("Make zone 2 the gaming zone").click();
+    h.run_steps(2);
+    let gaming = |h: &Harness<'_, Editor>| h.state().current().gaming_rects(WORK, MONITOR).unwrap()[0];
+    // Typing the left zone wider pushes it along, same size.
+    select(&mut h, Selection::Zones(vec![0]));
+    type_into(&mut h, "Width", "2300", true);
+    assert_eq!(gaming(&h), Rect::new(2300, 0, 4300, 2500));
+    assert_eq!((widths(&h)[0], widths(&h)[5]), (2300, 1844));
+    // Dragging it back left: the left zone shrinks, the right one grows.
+    h.state_mut().move_gaming_zone(1800, 0);
+    h.run_steps(2);
+    assert_eq!(gaming(&h), Rect::new(1800, 0, 3800, 2500));
+    assert_eq!((widths(&h)[0], widths(&h)[5]), (1800, 2344));
+    assert_eq!(h.state().status(), None);
 }
 
 #[test]

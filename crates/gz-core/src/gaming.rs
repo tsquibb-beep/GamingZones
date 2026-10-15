@@ -1,12 +1,9 @@
 //! The gaming zone: a zone of an exact size (a game's resolution), placed in the layout
-//! area, or within a space of its own (`within`, four guides, like a zone). Other zones can
-//! use its edges through the built-in guides `gz0.left`, `gz0.right`, `gz0.top` and
-//! `gz0.bottom`, so they rearrange themselves around it.
+//! area. Other zones and guides can use its edges through the built-in guides `gz0.left`,
+//! `gz0.right`, `gz0.top` and `gz0.bottom`, so they rearrange themselves around it.
 //!
 //! ```json
 //! "gaming_zones": [ { "size": { "pixels": { "w": 3840, "h": 2160 } }, "x": "centre", "y": 200 } ]
-//! "gaming_zones": [ { "size": { "pixels": { "w": 1920, "h": 1080 } }, "x": "centre", "y": "centre",
-//!                     "within": { "left": "g1", "right": "g2", "top": "area.top", "bottom": "area.bottom" } } ]
 //! ```
 
 use std::fmt;
@@ -14,7 +11,6 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::Rect;
-use crate::layout::Zone;
 
 /// Largest width or height accepted. Nothing has a monitor this big, so a larger size is
 /// a typo (and keeps the maths far from overflowing).
@@ -95,9 +91,9 @@ pub fn largest_aspect_step(ratio_w: u32, ratio_h: u32, w: i32, h: i32) -> u32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Position {
-    /// Pixels from the left (x) or top (y) edge of its space (the layout area, or `within`).
+    /// Pixels from the layout area's left (x) or top (y) edge.
     Px(i32),
-    /// `"centre"` (or `"center"`): centred in its space.
+    /// `"centre"` (or `"center"`): centred in the layout area.
     Align(Align),
 }
 
@@ -121,22 +117,21 @@ pub struct GamingZone {
     pub x: Position,
     #[serde(default)]
     pub y: Position,
-    /// Its space: the guides around it (the zone it was made from). The parts of the space
-    /// it doesn't cover are normal zones. `None`: the whole layout area.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub within: Option<Zone>,
+    /// Made from a zone (see `edit::make_gaming_zone`): the zones in that zone's space are its
+    /// leftovers, and turning it back into a normal zone merges them again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_zone: bool,
 }
 
 impl GamingZone {
-    /// A gaming zone in the whole layout area.
     pub fn new(size: GamingSize, x: Position, y: Position) -> GamingZone {
-        GamingZone { size, x, y, within: None }
+        GamingZone { size, x, y, from_zone: false }
     }
 
-    /// The zone's rectangle. Positions are relative to `area` (its space) and "centre"
-    /// centres in it. The zone is then kept inside `bounds` (its space, stretched to the
-    /// monitor's edges where the layout lets the gaming zone cover the taskbar); a zone
-    /// bigger than `bounds` is shrunk to fit.
+    /// The zone's rectangle. Positions are relative to `area` (the layout area) and
+    /// "centre" centres in it. The zone is then kept inside `bounds` (the work area, or the
+    /// whole monitor if the layout lets the gaming zone cover the taskbar); a zone bigger
+    /// than `bounds` is shrunk to fit.
     pub fn place(&self, area: Rect, bounds: Rect) -> Result<Rect, SizeError> {
         let (w, h) = self.size.pixels()?;
         let (w, h) = (w.min(bounds.width().max(0)), h.min(bounds.height().max(0)));

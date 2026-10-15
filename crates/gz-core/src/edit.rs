@@ -35,6 +35,10 @@ pub enum EditError {
     /// Neither edge of the zone can move to give it that size.
     CantResize,
     AlreadyHasGamingZone,
+    /// A merge of zones that move with the gaming zone and zones that don't.
+    MixesGaming,
+    /// The change would leave zones that come apart when something moves.
+    ComesApart,
 }
 
 impl fmt::Display for EditError {
@@ -49,6 +53,16 @@ impl fmt::Display for EditError {
             Self::Locked(i) => write!(f, "zone {} is locked and can't be pushed that way", i + 1),
             Self::CantResize => write!(f, "the zone can't be made that size (its edges can't move that far)"),
             Self::AlreadyHasGamingZone => write!(f, "the layout already has a gaming zone"),
+            Self::MixesGaming => write!(
+                f,
+                "those zones can't be merged: some move with the gaming zone and some don't. To give a zone beside \
+                 the gaming zone to its neighbour, drag the divider between them up to the gaming zone"
+            ),
+            Self::ComesApart => write!(
+                f,
+                "that would leave zones that only meet by chance, and would overlap or leave a gap when a \
+                 divider or the gaming zone moves"
+            ),
         }
     }
 }
@@ -191,12 +205,20 @@ pub fn convert_guide(
     move_guide(layout, id, pos, area, monitor)
 }
 
-/// Moves divider `id` to `pos` the way the editor does: like [`move_guide`], but every
-/// other guide stays where it is on this monitor (a split that depended on `id` gets a new
-/// fraction instead of moving with it), so only the zones on either side change.
+/// Smallest size (px) a divider drag or a typed size may leave a zone. The zones in the
+/// gaming zone's leftover space may shrink to nothing.
+pub const MIN_ZONE_PX: i32 = 10;
+
+/// Moves divider `id` towards `pos` the way the editor does, as far as it can go (no zone
+/// smaller than [`MIN_ZONE_PX`]):
 ///
-/// A zone in `locked` keeps its size: it's pushed along (both its edges move), and the next
-/// unlocked zone gives or takes the space. See [`pushed_guides`].
+/// - Every other guide stays where it is on this monitor (a split that depended on `id` gets
+///   a new fraction instead of moving with it), so only the zones on either side change.
+/// - A zone in `locked` keeps its size: it's pushed along, and the next unlocked zone gives
+///   or takes the space.
+/// - The gaming zone keeps its size too. A divider that follows it (the edge of its
+///   leftover space) first shrinks the leftover zone between them to nothing, then pushes
+///   the gaming zone along, and everything that follows it.
 pub fn move_divider(
     layout: &mut Layout,
     id: &str,
@@ -205,18 +227,213 @@ pub fn move_divider(
     area: Rect,
     monitor: Rect,
 ) -> Result<(), EditError> {
+    let axis = layout.guides.iter().find(|g| g.id == id).ok_or_else(|| EditError::NoSuchGuide(id.into()))?.axis;
+    let delta = pos - position(&layout.guide_positions(area, monitor)?, id)?;
+    if delta == 0 {
+        return Ok(());
+    }
+    let alone = Group { guides: vec![id.to_string()], gaming: false };
+    if !follows_gaming(layout, id) {
+        let group = grow(layout, alone, axis, locked, true)?;
+        return shift_within_limits(layout, &group, axis, delta, area, monitor);
+    }
+    let first = {
+        let group = grow(layout, alone, axis, locked, false)?;
+        let (lo, hi) = group_limits(layout, &group, axis, area, monitor, MIN_ZONE_PX)?;
+        let first = delta.clamp(lo, hi);
+        shift(layout, &group, axis, first, area, monitor)?;
+        first
+    };
+    // Pushing on into the gaming zone moves it, if the divider is on its outside.
+    let rest = delta - first;
+    let at = position(&layout.guide_positions(area, monitor)?, id)?;
+    let Some(g) = layout.gaming_rects(area, monitor)?.first().copied() else { return Ok(()) };
+    let (start, end) = span(g, axis);
+    if rest == 0 || !((rest > 0 && at <= start) || (rest < 0 && at >= end)) {
+        return Ok(());
+    }
+    let group = grow(layout, Group { guides: vec![id.to_string()], gaming: true }, axis, locked, true)?;
+    shift_within_limits(layout, &group, axis, rest, area, monitor)
+}
+
+/// Moves the gaming zone by (`dx`, `dy`), as far as it can go. Everything that follows it
+/// moves with it (its leftover zones and the dividers around them), so the zones beside it
+/// get bigger or smaller; locked zones are pushed along.
+pub fn move_gaming_zone(
+    layout: &mut Layout,
+    dx: i32,
+    dy: i32,
+    locked: &[usize],
+    area: Rect,
+    monitor: Rect,
+) -> Result<(), EditError> {
+    if layout.gaming_zones.is_empty() {
+        return Err(EditError::NoGamingZone);
+    }
+    for (axis, delta) in [(Axis::Vertical, dx), (Axis::Horizontal, dy)] {
+        if delta != 0 {
+            let group = grow(layout, Group { guides: Vec::new(), gaming: true }, axis, locked, true)?;
+            shift_within_limits(layout, &group, axis, delta, area, monitor)?;
+        }
+    }
+    Ok(())
+}
+
+/// Things that move together along one axis: some guides, and perhaps the gaming zone, which
+/// takes everything that follows it along.
+#[derive(Clone, Debug)]
+struct Group {
+    guides: Vec<String>,
+    gaming: bool,
+}
+
+impl Group {
+    fn moves(&self, layout: &Layout, side: &str) -> bool {
+        self.guides.iter().any(|g| g == side)
+            || (self.gaming && (parse_gaming_guide(side).is_some() || follows_gaming(layout, side)))
+    }
+}
+
+/// Adds what the group pushes along `axis`: a locked zone keeps its size, so when one of its
+/// sides moves the other does too (and so on). A locked zone that would have to push the
+/// area's edge can't move: [`EditError::Locked`]. With `whole_gaming`, a guide that follows
+/// the gaming zone brings the gaming zone along.
+fn grow(
+    layout: &Layout,
+    mut group: Group,
+    axis: Axis,
+    locked: &[usize],
+    whole_gaming: bool,
+) -> Result<Group, EditError> {
+    loop {
+        let mut more = false;
+        if whole_gaming && !group.gaming && group.guides.iter().any(|g| follows_gaming(layout, g)) {
+            group.gaming = true;
+            more = true;
+        }
+        for &i in locked {
+            let Some(z) = layout.zones.get(i) else { continue };
+            let (near, far) = sides(z, axis);
+            let other = match (group.moves(layout, near), group.moves(layout, far)) {
+                (true, false) => far,
+                (false, true) => near,
+                _ => continue,
+            };
+            if parse_gaming_guide(other).is_some() {
+                group.gaming = true;
+            } else if layout.guides.iter().any(|g| &g.id == other) {
+                group.guides.push(other.clone());
+            } else {
+                return Err(EditError::Locked(i));
+            }
+            more = true;
+        }
+        if !more {
+            return Ok(group);
+        }
+    }
+}
+
+/// How far (as a delta) the group can move along `axis`: its guides stay in the area, the
+/// gaming zone in its bounds, and every zone that gets smaller keeps `min` px (a zone already
+/// smaller may grow but not shrink). The zones between a guide and the gaming zone it
+/// follows may shrink to nothing.
+fn group_limits(
+    layout: &Layout,
+    group: &Group,
+    axis: Axis,
+    area: Rect,
+    monitor: Rect,
+    min: i32,
+) -> Result<(i32, i32), EditError> {
+    let positions = layout.guide_positions(area, monitor)?;
+    let pos = |id: &str| positions.get(id).map(|&(_, v)| v);
+    let (start, end) = span(area, axis);
+    let (mut lo, mut hi) = (i32::MIN, i32::MAX);
+    for g in layout.guides.iter().filter(|g| g.axis == axis && group.moves(layout, &g.id)) {
+        let p = pos(&g.id).unwrap_or(start);
+        lo = lo.max(start - p);
+        hi = hi.min(end - p);
+    }
+    if group.gaming {
+        let (bs, be) = span(layout.gaming_bounds(area, monitor), axis);
+        for g in layout.gaming_rects(area, monitor)? {
+            let (gs, ge) = span(g, axis);
+            lo = lo.max(bs - gs);
+            hi = hi.min(be - ge);
+        }
+    }
+    for z in &layout.zones {
+        let (near, far) = sides(z, axis);
+        let (near_moves, far_moves) = (group.moves(layout, near), group.moves(layout, far));
+        if near_moves == far_moves {
+            continue;
+        }
+        let other = if near_moves { far } else { near };
+        // The gaming zone's leftover zones (beside its edges) may shrink to nothing.
+        let leftover = parse_gaming_guide(near).is_some()
+            || parse_gaming_guide(far).is_some()
+            || (!group.gaming && follows_gaming(layout, other));
+        let min = if leftover { 0 } else { min };
+        let (Some(a), Some(b)) = (pos(near), pos(far)) else { continue };
+        if near_moves {
+            hi = hi.min((b - a - min).max(0));
+        } else {
+            lo = lo.max((min - (b - a)).min(0));
+        }
+    }
+    Ok(if lo > hi { (0, 0) } else { (lo, hi) })
+}
+
+fn shift_within_limits(
+    layout: &mut Layout,
+    group: &Group,
+    axis: Axis,
+    delta: i32,
+    area: Rect,
+    monitor: Rect,
+) -> Result<(), EditError> {
+    let (lo, hi) = group_limits(layout, group, axis, area, monitor, MIN_ZONE_PX)?;
+    shift(layout, group, axis, delta.clamp(lo, hi), area, monitor)
+}
+
+/// Moves the group by `delta` along `axis`; every other guide stays where it is on this monitor.
+fn shift(
+    layout: &mut Layout,
+    group: &Group,
+    axis: Axis,
+    delta: i32,
+    area: Rect,
+    monitor: Rect,
+) -> Result<(), EditError> {
+    if delta == 0 {
+        return Ok(());
+    }
     let before = layout.guide_positions(area, monitor)?;
-    let pushed = pushed_guides(layout, id, locked)?;
-    let delta = pos - position(&before, id)?;
+    if group.gaming {
+        let rects = layout.gaming_rects(area, monitor)?;
+        for (g, r) in layout.gaming_zones.iter_mut().zip(rects) {
+            match axis {
+                Axis::Vertical => g.x = Position::Px(r.left + delta - area.left),
+                Axis::Horizontal => g.y = Position::Px(r.top + delta - area.top),
+            }
+        }
+    }
     let targets: Vec<(String, i32)> = layout
         .guides
         .iter()
         .map(|g| {
             let at = before[&g.id].1;
-            (g.id.clone(), if pushed.contains(&g.id) { at + delta } else { at })
+            let moves = g.axis == axis && group.moves(layout, &g.id);
+            (g.id.clone(), if moves { at + delta } else { at })
         })
         .collect();
-    // Moving a guide can move others that depend on it, so go round until all are in place.
+    place_guides(layout, &targets, area, monitor)
+}
+
+/// Moves each guide to its target position (keeping its kind of anchor). Moving a guide can
+/// move others that depend on it, so this goes round until all are in place.
+fn place_guides(layout: &mut Layout, targets: &[(String, i32)], area: Rect, monitor: Rect) -> Result<(), EditError> {
     for _ in 0..=targets.len() {
         let now = layout.guide_positions(area, monitor)?;
         let off: Vec<&(String, i32)> =
@@ -229,34 +446,6 @@ pub fn move_divider(
         }
     }
     Ok(())
-}
-
-/// The guides that move together when divider `id` moves: `id`, and the far edge of every
-/// locked zone it pushes (and so on, through a row of locked zones). A locked zone that would
-/// have to push the area's edge or the gaming zone can't move: [`EditError::Locked`].
-pub fn pushed_guides(layout: &Layout, id: &str, locked: &[usize]) -> Result<Vec<String>, EditError> {
-    let axis = layout.guides.iter().find(|g| g.id == id).ok_or_else(|| EditError::NoSuchGuide(id.into()))?.axis;
-    let mut pushed = vec![id.to_string()];
-    loop {
-        let mut more = false;
-        for &i in locked {
-            let Some(z) = layout.zones.get(i) else { continue };
-            let (near, far) = sides(z, axis);
-            let other = match (pushed.contains(near), pushed.contains(far)) {
-                (true, false) => far,
-                (false, true) => near,
-                _ => continue,
-            };
-            if !layout.guides.iter().any(|g| &g.id == other) {
-                return Err(EditError::Locked(i));
-            }
-            pushed.push(other.clone());
-            more = true;
-        }
-        if !more {
-            return Ok(pushed);
-        }
-    }
 }
 
 /// A zone's two sides across `axis`: (left, right) for a vertical divider, (top, bottom) otherwise.
@@ -292,46 +481,25 @@ pub fn guide_mut<'a>(layout: &'a mut Layout, id: &str) -> Result<&'a mut Guide, 
     layout.guides.iter_mut().find(|g| g.id == id).ok_or_else(|| EditError::NoSuchGuide(id.into()))
 }
 
-/// How far guide `id` can be dragged (pushing locked zones, see [`move_divider`]): every
-/// zone that gets smaller keeps at least `min` px. Zones beside the gaming zone don't count,
-/// as they move with it. A divider that can't move at all gives (current, current).
+/// How far divider `id` can be dragged without pushing the gaming zone (see [`move_divider`]),
+/// keeping zones at least `min` px: (lowest, highest) position. (current, current) if it
+/// can't move.
 pub fn guide_limits(
     layout: &Layout,
-    positions: &GuidePositions,
     id: &str,
     locked: &[usize],
     area: Rect,
+    monitor: Rect,
     min: i32,
-) -> (i32, i32) {
-    let Some(&(axis, current)) = positions.get(id) else { return (0, 0) };
-    let Ok(pushed) = pushed_guides(layout, id, locked) else { return (current, current) };
-    let pos = |id: &str| positions.get(id).map(|&(_, v)| v);
-    // Limits on how far (delta) the pushed guides move.
-    let (start, end) = span(area, axis);
-    let (mut lo, mut hi) = (i32::MIN, i32::MAX);
-    for p in pushed.iter().filter_map(|g| pos(g)) {
-        lo = lo.max(start - p);
-        hi = hi.min(end - p);
-    }
-    for z in &layout.zones {
-        let (near, far) = sides(z, axis);
-        let (near_moves, far_moves) = (pushed.contains(near), pushed.contains(far));
-        if near_moves == far_moves || follows_gaming(layout, if near_moves { far } else { near }) {
-            continue;
-        }
-        let (Some(a), Some(b)) = (pos(near), pos(far)) else { continue };
-        // A zone already under `min` may grow but not shrink.
-        if near_moves {
-            hi = hi.min((b - a - min).max(0));
-        } else {
-            lo = lo.max((min - (b - a)).min(0));
-        }
-    }
-    if lo > hi {
-        (current, current)
-    } else {
-        (current.saturating_add(lo), current.saturating_add(hi))
-    }
+) -> Result<(i32, i32), EditError> {
+    let guide = layout.guides.iter().find(|g| g.id == id).ok_or_else(|| EditError::NoSuchGuide(id.into()))?;
+    let current = position(&layout.guide_positions(area, monitor)?, id)?;
+    let whole = !follows_gaming(layout, id);
+    let (lo, hi) = match grow(layout, Group { guides: vec![id.into()], gaming: false }, guide.axis, locked, whole) {
+        Ok(group) => group_limits(layout, &group, guide.axis, area, monitor, min)?,
+        Err(_) => (0, 0),
+    };
+    Ok((current + lo, current + hi))
 }
 
 /// The first zone in `locked` whose size differs between two resolutions of a layout
@@ -455,10 +623,18 @@ pub fn merge(layout: &mut Layout, selected: &[usize], area: Rect, monitor: Rect)
     let Some(bounds) = selected.iter().map(|&i| resolved[i].rect).reduce(|a, b| a.union(&b)) else {
         return Err(EditError::NotARectangle);
     };
-    let within =
-        |r: &Rect| bounds.left <= r.left && r.right <= bounds.right && bounds.top <= r.top && r.bottom <= bounds.bottom;
-    let inside: Vec<usize> = (0..count).filter(|&i| within(&resolved[i].rect)).collect();
-    let rects: Vec<Rect> = inside.iter().map(|&i| resolved[i].rect).filter(|r| !r.is_empty()).collect();
+    let within = |r: &Rect| {
+        bounds.left <= r.left.min(r.right)
+            && r.left.max(r.right) <= bounds.right
+            && bounds.top <= r.top.min(r.bottom)
+            && r.top.max(r.bottom) <= bounds.bottom
+    };
+    // Empty zones never give the merged zone its edges.
+    let inside: Vec<usize> =
+        (0..count).filter(|&i| !resolved[i].rect.is_empty() && within(&resolved[i].rect)).collect();
+    let empty_inside: Vec<usize> =
+        (0..count).filter(|&i| resolved[i].rect.is_empty() && within(&resolved[i].rect)).collect();
+    let rects: Vec<Rect> = inside.iter().map(|&i| resolved[i].rect).collect();
     let area_of = |r: &Rect| r.width() as i64 * r.height() as i64;
     let overlap =
         |a: &Rect, b: &Rect| a.left.max(b.left) < a.right.min(b.right) && a.top.max(b.top) < a.bottom.min(b.bottom);
@@ -467,6 +643,22 @@ pub fn merge(layout: &mut Layout, selected: &[usize], area: Rect, monitor: Rect)
         && rects.iter().enumerate().all(|(n, a)| rects[n + 1..].iter().all(|b| !overlap(a, b)));
     if gaming_in_the_way || !tiles {
         return Err(EditError::NotARectangle);
+    }
+    // Each side must move one way: with the gaming zone, or not. (Zones whose sides only meet
+    // because the gaming zone is against the screen's edge would come apart when it moves.)
+    let side_guides = |on_edge: &dyn Fn(&Rect) -> bool, side: &dyn Fn(&Zone) -> &String| -> Vec<String> {
+        inside.iter().filter(|&&i| on_edge(&resolved[i].rect)).map(|&i| side(&layout.zones[i]).clone()).collect()
+    };
+    for ids in [
+        side_guides(&|r| r.left == bounds.left, &|z| &z.left),
+        side_guides(&|r| r.right == bounds.right, &|z| &z.right),
+        side_guides(&|r| r.top == bounds.top, &|z| &z.top),
+        side_guides(&|r| r.bottom == bounds.bottom, &|z| &z.bottom),
+    ] {
+        let follows = |g: &String| follows_gaming(layout, g);
+        if ids.iter().any(follows) && !ids.iter().all(follows) {
+            return Err(EditError::MixesGaming);
+        }
     }
     // The outer guides: taken from a zone that has that edge on the bounding rectangle.
     let edge = |on_edge: &dyn Fn(&Rect) -> bool, side: &dyn Fn(&Zone) -> &String| {
@@ -478,13 +670,138 @@ pub fn merge(layout: &mut Layout, selected: &[usize], area: Rect, monitor: Rect)
         top: edge(&|r| r.top == bounds.top, &|z| &z.top).ok_or(EditError::NotARectangle)?,
         bottom: edge(&|r| r.bottom == bounds.bottom, &|z| &z.bottom).ok_or(EditError::NotARectangle)?,
     };
-    let first = inside[0];
-    for &i in inside.iter().rev() {
-        layout.zones.remove(i);
+    // Empty zones on its edges may belong inside it (the strip beside a gaming zone that fills
+    // its space, inside the merge) or not: keep them unless that leaves the layout coming apart
+    // when something moves.
+    for absorb in [false, true] {
+        let mut gone = inside.clone();
+        if absorb {
+            gone.extend(&empty_inside);
+            gone.sort_unstable();
+        }
+        let mut trial = layout.clone();
+        let first = gone[0];
+        for &i in gone.iter().rev() {
+            trial.zones.remove(i);
+        }
+        trial.zones.insert(first, merged.clone());
+        remove_unused_guides(&mut trial);
+        if stays_whole(&trial, area, monitor) {
+            *layout = trial;
+            return Ok(first);
+        }
     }
-    layout.zones.insert(first, merged);
-    remove_unused_guides(layout);
-    Ok(first)
+    Err(EditError::ComesApart)
+}
+
+/// Joins guides that only meet by chance: where one zone's side and a neighbour's side are
+/// different guides on the same line (they'd come apart when one is dragged), the neighbour
+/// uses the first zone's guide from then on. Guides that move differently (one with the
+/// gaming zone, one not) are left alone. Nothing moves on this monitor. Returns whether
+/// anything changed.
+pub fn join_coincident(layout: &mut Layout, area: Rect, monitor: Rect) -> bool {
+    let mut changed = false;
+    // Each join can make another visible, so repeat (each one removes a guide).
+    for _ in 0..=layout.guides.len() {
+        let (Ok(zones), Ok(positions)) = (layout.resolve(area, monitor, 0), layout.guide_positions(area, monitor))
+        else {
+            return changed;
+        };
+        let user = |id: &String| layout.guides.iter().any(|g| &g.id == id);
+        let mut join = None;
+        'search: for (a, za) in layout.zones.iter().enumerate() {
+            for (b, zb) in layout.zones.iter().enumerate() {
+                let (ra, rb) = (zones[a].rect, zones[b].rect);
+                if ra.is_empty() || rb.is_empty() {
+                    continue;
+                }
+                for (keep, drop, meet) in [
+                    (&za.right, &zb.left, ra.right == rb.left && ra.top.max(rb.top) < ra.bottom.min(rb.bottom)),
+                    (&za.bottom, &zb.top, ra.bottom == rb.top && ra.left.max(rb.left) < ra.right.min(rb.right)),
+                ] {
+                    if meet
+                        && keep != drop
+                        && user(drop)
+                        && positions.get(keep) == positions.get(drop)
+                        && follows_gaming(layout, keep) == follows_gaming(layout, drop)
+                    {
+                        join = Some((keep.clone(), drop.clone()));
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let Some((keep, drop)) = join else { return changed };
+        // `keep` mustn't depend on `drop` (that would be a loop once renamed).
+        let mut l = layout.clone();
+        rename_references(&mut l, &drop, &keep);
+        l.guides.retain(|g| g.id != drop);
+        if l.validate().is_err()
+            || l.guide_positions(area, monitor).ok().as_ref().map(|p| p.get(&keep)) != Some(positions.get(&keep))
+        {
+            return changed;
+        }
+        *layout = l;
+        changed = true;
+    }
+    changed
+}
+
+/// How much the zones (gaming zones included, clipped to the area) overlap each other, and
+/// how much of the area they cover.
+fn coverage(layout: &Layout, area: Rect, monitor: Rect) -> Option<(i64, i64)> {
+    let rects: Vec<Rect> = layout
+        .resolve(area, monitor, 0)
+        .ok()?
+        .iter()
+        .filter(|z| !z.rect.is_empty())
+        .map(|z| z.rect.intersect(&area))
+        .filter(|r| !r.is_empty())
+        .collect();
+    let size = |r: &Rect| r.width() as i64 * r.height() as i64;
+    let mut overlap = 0;
+    for (n, a) in rects.iter().enumerate() {
+        for b in &rects[n + 1..] {
+            let (w, h) = (a.right.min(b.right) - a.left.max(b.left), a.bottom.min(b.bottom) - a.top.max(b.top));
+            if w > 0 && h > 0 {
+                overlap += w as i64 * h as i64;
+            }
+        }
+    }
+    Some((overlap, rects.iter().map(size).sum::<i64>() - overlap))
+}
+
+/// Whether the layout stays in one piece when any divider or the gaming zone is moved a
+/// little (the way the editor moves them): no new overlaps and, if the zones covered the
+/// whole area, no gaps. Two zones that meet only by coincidence (on two guides that don't
+/// move together) fail this.
+pub fn stays_whole(layout: &Layout, area: Rect, monitor: Rect) -> bool {
+    let Some((overlap, covered)) = coverage(layout, area, monitor) else { return false };
+    let full = covered == area.width() as i64 * area.height() as i64;
+    let still_whole = |edit: &dyn Fn(&mut Layout) -> Result<(), EditError>| {
+        let mut l = layout.clone();
+        if edit(&mut l).is_err() {
+            return true;
+        }
+        coverage(&l, area, monitor).is_some_and(|(o, c)| o <= overlap && (!full || c == covered))
+    };
+    let Ok(positions) = layout.guide_positions(area, monitor) else { return false };
+    for g in &layout.guides {
+        let at = positions[&g.id].1;
+        for d in [-5, 5] {
+            if !still_whole(&|l| move_divider(l, &g.id, at + d, &[], area, monitor)) {
+                return false;
+            }
+        }
+    }
+    if !layout.gaming_zones.is_empty() {
+        for (dx, dy) in [(-5, 0), (5, 0), (0, -5), (0, 5)] {
+            if !still_whole(&|l| move_gaming_zone(l, dx, dy, &[], area, monitor)) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Deletes zones (leaving a gap) and the guides only they used.
@@ -507,13 +824,8 @@ pub fn delete_zones(layout: &mut Layout, indices: &[usize]) -> Result<(), EditEr
 
 /// Removes guides that no zone uses, directly or through other guides.
 pub fn remove_unused_guides(layout: &mut Layout) {
-    let mut used: HashSet<String> = layout
-        .zones
-        .iter()
-        .chain(layout.gaming_zones.iter().filter_map(|g| g.within.as_ref()))
-        .flat_map(|z| [&z.left, &z.right, &z.top, &z.bottom])
-        .cloned()
-        .collect();
+    let mut used: HashSet<String> =
+        layout.zones.iter().flat_map(|z| [&z.left, &z.right, &z.top, &z.bottom]).cloned().collect();
     loop {
         let more: Vec<String> = layout
             .guides
@@ -534,8 +846,8 @@ pub fn remove_unused_guides(layout: &mut Layout) {
     layout.guides.retain(|g| used.contains(&g.id));
 }
 
-/// Adds a gaming zone (centred in the whole area) if the layout has none. Existing zones
-/// are kept; see [`arrange_around_gaming_zone`].
+/// Adds a gaming zone (centred) if the layout has none. Existing zones are kept; see
+/// [`arrange_around_gaming_zone`].
 pub fn add_gaming_zone(layout: &mut Layout, size: GamingSize) {
     if layout.gaming_zones.is_empty() {
         layout.gaming_zones.push(GamingZone::new(size, Position::default(), Position::default()));
@@ -543,12 +855,12 @@ pub fn add_gaming_zone(layout: &mut Layout, size: GamingSize) {
 }
 
 /// Replaces the zones with four around the gaming zone: a full-height column either side
-/// and a strip above and below it. The gaming zone's space becomes the whole area.
+/// and a strip above and below it.
 pub fn arrange_around_gaming_zone(layout: &mut Layout) -> Result<(), EditError> {
     let Some(g) = layout.gaming_zones.first_mut() else {
         return Err(EditError::NoGamingZone);
     };
-    g.within = None;
+    g.from_zone = false;
     let gz = |edge: &str| gaming_guide(0, edge);
     let zone = |l: String, t: String, r: String, b: String| Zone { left: l, right: r, top: t, bottom: b };
     let a = |id: &str| id.to_string();
@@ -562,26 +874,63 @@ pub fn arrange_around_gaming_zone(layout: &mut Layout) -> Result<(), EditError> 
     Ok(())
 }
 
-/// Turns zone `index` into the gaming zone: the zone's space becomes its space, and it fills
-/// it exactly (its size is the zone's size here, centred). The zones around are untouched.
+/// The edge `side` ("left", …) of gaming zone 0 a guide follows directly: its anchor is an
+/// offset from that edge.
+fn edge_followed(g: &Guide) -> Option<&str> {
+    match &g.anchor {
+        Anchor::Offset { from, .. } => parse_gaming_guide(from).map(|(_, side)| side),
+        _ => None,
+    }
+}
+
+/// Turns zone `index` into the gaming zone, exactly the zone's size and place.
 ///
-/// Four zones take the zone's place and partition whatever the gaming zone doesn't cover: a
-/// strip above it (the space's full width), one left and right of it, and one below. They're
-/// empty (and have no number) until the gaming zone is made smaller than its space.
+/// - The dividers around the zone now follow the gaming zone (they're kept at a distance
+///   from its edges, 0 to start with), so moving it moves them, and the zones beside it.
+/// - Four zones take the zone's place and partition whatever the gaming zone doesn't cover:
+///   a strip above it, one left and right of it, and one below. They're empty (and have no
+///   number) until it's made smaller.
 pub fn make_gaming_zone(layout: &mut Layout, index: usize, area: Rect, monitor: Rect) -> Result<(), EditError> {
     if !layout.gaming_zones.is_empty() {
         return Err(EditError::AlreadyHasGamingZone);
     }
     let zone = layout.zones.get(index).ok_or(EditError::NoSuchZone(index))?.clone();
     let r = layout.resolve(area, monitor, 0)?[index].rect;
-    let size = GamingSize::Pixels { w: r.width().max(1) as u32, h: r.height().max(1) as u32 };
+    if r.is_empty() {
+        return Err(EditError::NoSuchZone(index));
+    }
+    let size = GamingSize::Pixels { w: r.width() as u32, h: r.height() as u32 };
+    // Written as "centre" when that's where it is.
+    let place = |at: i32, len: i32, start: i32, area_len: i32| {
+        if at == start + (area_len - len).div_euclid(2) {
+            Position::Align(Align::Centre)
+        } else {
+            Position::Px(at - start)
+        }
+    };
     layout.gaming_zones.push(GamingZone {
         size,
-        x: Position::Align(Align::Centre),
-        y: Position::Align(Align::Centre),
-        within: Some(zone.clone()),
+        x: place(r.left, r.width(), area.left, area.width()),
+        y: place(r.top, r.height(), area.top, area.height()),
+        from_zone: true,
     });
     let gz = |edge: &str| gaming_guide(0, edge);
+    let sides = [("left", &zone.left), ("right", &zone.right), ("top", &zone.top), ("bottom", &zone.bottom)];
+    for (side, id) in sides {
+        if let Ok(g) = guide_mut(layout, id) {
+            g.anchor = Anchor::Offset { from: gz(side), px: 0 };
+        }
+    }
+    // Only the zone's own sides follow it: guides positioned from them stay where they are.
+    let others: Vec<String> = layout
+        .guides
+        .iter()
+        .filter(|g| !sides.iter().any(|(_, id)| **id == g.id) && follows_gaming(layout, &g.id))
+        .map(|g| g.id.clone())
+        .collect();
+    for id in others {
+        convert_guide(layout, &id, GuideKind::Percent, area, monitor)?;
+    }
     let make =
         |left: &String, right: String, top: String, bottom: String| Zone { left: left.clone(), right, top, bottom };
     layout.zones.splice(
@@ -596,65 +945,174 @@ pub fn make_gaming_zone(layout: &mut Layout, index: usize, area: Rect, monitor: 
     Ok(())
 }
 
+/// The space a gaming zone made from a zone has: bounded by the dividers that follow its
+/// edges, or the area's edges where there are none. `None` for other gaming zones.
+pub fn gaming_space(layout: &Layout, area: Rect, monitor: Rect) -> Result<Option<Rect>, EditError> {
+    if !layout.gaming_zones.first().is_some_and(|g| g.from_zone) {
+        return Ok(None);
+    }
+    Ok(Some(space_sides(layout, area, monitor)?.1))
+}
+
+/// The space's sides (guide ids, left/right/top/bottom) and rectangle.
+fn space_sides(layout: &Layout, area: Rect, monitor: Rect) -> Result<([String; 4], Rect), EditError> {
+    let positions = layout.guide_positions(area, monitor)?;
+    let side = |name: &str, area_side: &str| -> String {
+        layout
+            .guides
+            .iter()
+            .find(|g| edge_followed(g) == Some(name))
+            .map_or_else(|| area_side.to_string(), |g| g.id.clone())
+    };
+    let ids = [side("left", AREA_LEFT), side("right", AREA_RIGHT), side("top", AREA_TOP), side("bottom", AREA_BOTTOM)];
+    let p = |id: &String| positions.get(id).map_or(0, |&(_, v)| v);
+    let rect = Rect::new(p(&ids[0]), p(&ids[2]), p(&ids[1]), p(&ids[3]));
+    Ok((ids, rect))
+}
+
+/// Changes the gaming zone (size or position as in `new`) without moving any divider that
+/// doesn't have to: its leftover zones get bigger or smaller instead. If it grows past the
+/// dividers around its space, they're pushed out, and the zones beside it shrink.
+pub fn set_gaming_zone(layout: &mut Layout, new: GamingZone, area: Rect, monitor: Rect) -> Result<(), EditError> {
+    if layout.gaming_zones.is_empty() {
+        return Err(EditError::NoGamingZone);
+    }
+    let before = layout.guide_positions(area, monitor)?;
+    let resolved = layout.resolve(area, monitor, 0)?;
+    layout.gaming_zones[0] = new;
+    let g = layout.gaming_rects(area, monitor)?[0];
+    let mut targets: Vec<(String, i32)> = layout.guides.iter().map(|g| (g.id.clone(), before[&g.id].1)).collect();
+    for (id, at) in &mut targets {
+        let guide = layout.guides.iter().find(|x| &x.id == id).expect("listed");
+        *at = match edge_followed(guide) {
+            Some("left") => (*at).min(g.left),
+            Some("right") => (*at).max(g.right),
+            Some("top") => (*at).min(g.top),
+            Some("bottom") => (*at).max(g.bottom),
+            _ => *at,
+        };
+    }
+    place_guides(layout, &targets, area, monitor)?;
+    let after = layout.resolve(area, monitor, 0)?;
+    let inverted = |r: &Rect| r.width() < 0 || r.height() < 0;
+    if resolved.iter().zip(&after).any(|(b, a)| !inverted(&b.rect) && inverted(&a.rect)) {
+        return Err(EditError::CantResize);
+    }
+    Ok(())
+}
+
+/// Makes the gaming zone fill its space again (see [`gaming_space`]).
+pub fn fill_space(layout: &mut Layout, area: Rect, monitor: Rect) -> Result<(), EditError> {
+    let Some(space) = gaming_space(layout, area, monitor)? else {
+        return Err(EditError::NoGamingZone);
+    };
+    let mut new = layout.gaming_zones[0].clone();
+    new.size = GamingSize::Pixels { w: space.width().max(1) as u32, h: space.height().max(1) as u32 };
+    new.x = Position::Px(space.left - area.left);
+    new.y = Position::Px(space.top - area.top);
+    set_gaming_zone(layout, new, area, monitor)
+}
+
 /// Turns the gaming zone(s) back into normal zones.
 ///
-/// - One with a space of its own ([`make_gaming_zone`]): the zones inside that space (the
-///   bits it didn't cover, however they were split) are replaced by one zone filling it.
-/// - One in the whole area: its edges become percentage guides at the same place and a
-///   zone fills it, so on this monitor nothing moves.
+/// - Made from a zone ([`make_gaming_zone`]): the zones inside its space (the leftovers,
+///   however they were split) and the gaming zone become one zone filling the space again.
+/// - Otherwise a zone takes its place, and the zones around it stay where they are.
+///
+/// Either way nothing else moves on this monitor: guides that followed the gaming zone
+/// become percentages of the area at the same place.
 pub fn remove_gaming_zone(layout: &mut Layout, area: Rect, monitor: Rect) -> Result<(), EditError> {
     if layout.gaming_zones.is_empty() {
         return Err(EditError::NoGamingZone);
     }
+    // Empty zones on the space's edge may belong inside it or not (see `merge`): take in as
+    // few as keep the layout whole.
+    for absorb in 0..3 {
+        let mut trial = layout.clone();
+        remove_gaming_zone_absorbing(&mut trial, absorb, area, monitor)?;
+        if stays_whole(&trial, area, monitor) {
+            *layout = trial;
+            return Ok(());
+        }
+    }
+    Err(EditError::ComesApart)
+}
+
+/// [`remove_gaming_zone`], taking in the empty zones on its space's edges that use the
+/// gaming zone's edges (`absorb` = 0), or any guide that follows it (1), or all of them (2).
+fn remove_gaming_zone_absorbing(layout: &mut Layout, absorb: u8, area: Rect, monitor: Rect) -> Result<(), EditError> {
     let positions = layout.guide_positions(area, monitor)?;
     let resolved = layout.resolve(area, monitor, 0)?;
-    let mut spaces = Vec::new();
-    for i in 0..layout.gaming_zones.len() {
-        if let Some(z) = layout.gaming_zones[i].within.clone() {
-            spaces.push((z, layout.gaming_space(i, area, monitor)?.0, false));
-        }
-    }
-    let inside = |r: &Rect, s: &Rect| {
-        r.left.min(r.right) >= s.left
-            && r.left.max(r.right) <= s.right
-            && r.top.min(r.bottom) >= s.top
-            && r.top.max(r.bottom) <= s.bottom
-    };
-    let mut zones = Vec::new();
-    for (z, r) in layout.zones.iter().zip(&resolved) {
-        match spaces.iter_mut().find(|(_, s, _)| inside(&r.rect, s)) {
-            Some((space, _, placed)) => {
-                if !*placed {
-                    zones.push(space.clone());
-                    *placed = true;
-                }
+    let from_zone = layout.gaming_zones[0].from_zone;
+    if from_zone {
+        let (sides, space) = space_sides(layout, area, monitor)?;
+        let inside = |z: &Zone, r: &Rect| {
+            let within = r.left.min(r.right) >= space.left
+                && r.left.max(r.right) <= space.right
+                && r.top.min(r.bottom) >= space.top
+                && r.top.max(r.bottom) <= space.bottom;
+            let sides = [&z.left, &z.right, &z.top, &z.bottom];
+            within
+                && (!r.is_empty()
+                    || match absorb {
+                        0 => sides.iter().any(|g| parse_gaming_guide(g).is_some()),
+                        1 => sides.iter().any(|g| follows_gaming(layout, g)),
+                        _ => true,
+                    })
+        };
+        let [left, right, top, bottom] = sides;
+        let whole = Zone { left, right, top, bottom };
+        let mut zones = Vec::new();
+        let mut placed = false;
+        for (z, r) in layout.zones.iter().zip(&resolved) {
+            if !inside(z, &r.rect) {
+                zones.push(z.clone());
+            } else if !placed {
+                zones.push(whole.clone());
+                placed = true;
             }
-            None => zones.push(z.clone()),
         }
+        if !placed {
+            zones.push(whole);
+        }
+        layout.zones = zones;
     }
-    zones.extend(spaces.into_iter().filter(|(_, _, placed)| !placed).map(|(z, _, _)| z));
-    layout.zones = zones;
-
-    // Anything else that used the gaming zone's edges gets guides at the same place.
+    // Guides positioned from the gaming zone become percentages where they are.
+    let percent_at = |axis: Axis, pos: i32| {
+        let (start, end) = span(area, axis);
+        let pos = pos.clamp(start, end);
+        if end == start {
+            0.0
+        } else {
+            let raw = (pos - start) as f64 * 100.0 / (end - start) as f64;
+            shortest(raw, |p| percent_of(start, end, p) == pos as i64)
+        }
+    };
+    let followers: Vec<String> =
+        layout.guides.iter().filter(|g| follows_gaming(layout, &g.id)).map(|g| g.id.clone()).collect();
+    for id in &followers {
+        let (axis, pos) = positions[id];
+        guide_mut(layout, id)?.anchor = Anchor::Percent(percent_at(axis, pos));
+    }
+    // Zones that used its edges get guides there: one that followed it on that line if there
+    // is one (two guides on one line would come apart when one is dragged), or a new one.
     for i in 0..layout.gaming_zones.len() {
         let mut edges = Vec::new();
         for edge in ["left", "right", "top", "bottom"] {
             let old = gaming_guide(i, edge);
             let (axis, pos) = positions[&old];
-            let (start, end) = span(area, axis);
-            let pos = pos.clamp(start, end);
-            let percent = if end == start {
-                0.0
-            } else {
-                let raw = (pos - start) as f64 * 100.0 / (end - start) as f64;
-                shortest(raw, |p| percent_of(start, end, p) == pos as i64)
+            let id = match followers.iter().find(|f| positions[*f] == (axis, pos)) {
+                Some(f) => f.clone(),
+                None => {
+                    let id = new_guide_id(layout);
+                    layout.guides.push(Guide { id: id.clone(), axis, anchor: Anchor::Percent(percent_at(axis, pos)) });
+                    id
+                }
             };
-            let id = new_guide_id(layout);
-            layout.guides.push(Guide { id: id.clone(), axis, anchor: Anchor::Percent(percent) });
             rename_references(layout, &old, &id);
             edges.push(id);
         }
-        if layout.gaming_zones[i].within.is_none() {
+        if !from_zone {
             let [left, right, top, bottom] = <[String; 4]>::try_from(edges).expect("four edges");
             layout.zones.push(Zone { left, right, top, bottom });
         }
@@ -671,7 +1129,7 @@ fn rename_references(layout: &mut Layout, old: &str, new: &str) {
             *s = new.to_string();
         }
     };
-    for z in layout.zones.iter_mut().chain(layout.gaming_zones.iter_mut().filter_map(|g| g.within.as_mut())) {
+    for z in &mut layout.zones {
         fix(&mut z.left);
         fix(&mut z.right);
         fix(&mut z.top);
@@ -796,7 +1254,7 @@ mod tests {
         let l = LayoutsFile::defaults().get("split-focus").unwrap().clone();
         let positions = l.guide_positions(WORK, MONITOR).unwrap();
         // left-col (1290) is bounded by area.left on one side and centre-split (3072) on the other.
-        assert_eq!(guide_limits(&l, &positions, "left-col", &[], WORK, 50), (50, 3022));
+        assert_eq!(guide_limits(&l, "left-col", &[], WORK, MONITOR, 50), Ok((50, 3022)));
         let d = dividers(&l, &positions);
         assert_eq!(d.len(), 6);
         let side = d.iter().find(|d| d.guide == "side-split").unwrap();
@@ -871,8 +1329,7 @@ mod tests {
         move_divider(&mut l, "g1", 1000, &[1], WORK, MONITOR).unwrap();
         assert_eq!(widths(&l), [1000, 2000, 3144]);
         // Limits: zone 1 can shrink to 10 px, zone 3 to 10 px (the locked zone stays 2000).
-        let positions = l.guide_positions(WORK, MONITOR).unwrap();
-        assert_eq!(guide_limits(&l, &positions, "g1", &[1], WORK, 10), (10, 4134));
+        assert_eq!(guide_limits(&l, "g1", &[1], WORK, MONITOR, 10), Ok((10, 4134)));
         // Typing zone 1's width pushes the locked zone too.
         resize_zone(&mut l, 0, Axis::Vertical, 2028, &[1], WORK, MONITOR).unwrap();
         assert_eq!(widths(&l), [2028, 2000, 2116]);
@@ -882,10 +1339,27 @@ mod tests {
         assert_eq!(widths(&l), [1828, 2000, 972, 1344]);
         // A locked zone against the screen's edge can't be pushed.
         assert_eq!(move_divider(&mut l, "g1", 1900, &[0], WORK, MONITOR), Err(EditError::Locked(0)));
-        let positions = l.guide_positions(WORK, MONITOR).unwrap();
-        assert_eq!(guide_limits(&l, &positions, "g1", &[0], WORK, 10), (1828, 1828));
+        assert_eq!(guide_limits(&l, "g1", &[0], WORK, MONITOR, 10), Ok((1828, 1828)));
         // A locked zone's own size can't be typed.
         assert_eq!(resize_zone(&mut l, 1, Axis::Vertical, 100, &[1], WORK, MONITOR), Err(EditError::Locked(1)));
+    }
+
+    fn gaming(l: &Layout) -> Rect {
+        *rects(l).last().unwrap()
+    }
+
+    /// The gaming zone at `w`×`h`, centred where it is now (as the editor's size boxes do).
+    fn resize_gaming(l: &mut Layout, w: u32, h: u32) -> Result<(), EditError> {
+        let g = gaming(l);
+        let mut new = l.gaming_zones[0].clone();
+        new.size = GamingSize::Pixels { w, h };
+        if let Position::Px(_) = new.x {
+            new.x = Position::Px(g.left + (g.width() - w as i32) / 2);
+        }
+        if let Position::Px(_) = new.y {
+            new.y = Position::Px(g.top + (g.height() - h as i32) / 2);
+        }
+        set_gaming_zone(l, new, WORK, MONITOR)
     }
 
     #[test]
@@ -895,23 +1369,26 @@ mod tests {
         let mut l = slay.clone();
         make_gaming_zone(&mut l, 1, WORK, MONITOR).unwrap();
         assert_eq!(l.gaming_zones[0].size, GamingSize::Pixels { w: 2950, h: 2500 });
-        assert_eq!(l.gaming_zones[0].within.as_ref(), Some(&slay.zones[1]));
+        assert_eq!((l.gaming_zones[0].x, l.gaming_zones[0].from_zone), (Position::Align(Align::Centre), true));
         let zones = l.resolve(WORK, MONITOR, 300).unwrap();
         let r: Vec<Rect> = zones.iter().map(|z| z.rect).collect();
-        assert_eq!(r[0], Rect::new(0, 0, 1597, 2500)); // the columns either side are untouched
+        assert_eq!(r[0], Rect::new(0, 0, 1597, 2500));
         assert_eq!(r[5], Rect::new(4547, 0, 6144, 2500));
-        assert_eq!(r[6], Rect::new(1597, 0, 4547, 2500)); // the gaming zone fills the column
-                                                          // The four zones in its place are empty, so they have no number.
+        assert_eq!(r[6], Rect::new(1597, 0, 4547, 2500));
+        // The four zones in its place are empty, so they have no number.
         assert!(r[1..5].iter().all(|r| r.is_empty()), "{r:?}");
         let labels: Vec<String> = (0..zones.len()).map(|i| crate::layout::zone_label(&zones, i)).collect();
         assert_eq!(labels, ["1", "-", "-", "-", "-", "2", "G"]);
+        assert_eq!(gaming_space(&l, WORK, MONITOR), Ok(Some(Rect::new(1597, 0, 4547, 2500))));
+        // Turned straight back: exactly the layout it was.
+        let mut back = l.clone();
+        remove_gaming_zone(&mut back, WORK, MONITOR).unwrap();
+        assert_eq!(back, slay);
 
-        // Made smaller, the bits it doesn't cover become zones.
-        l.gaming_zones[0].size = GamingSize::Pixels { w: 1920, h: 1080 };
-        let zones = l.resolve(WORK, MONITOR, 0).unwrap();
-        let r: Vec<Rect> = zones.iter().map(|z| z.rect).collect();
+        // Made smaller, the bits it doesn't cover become zones; no divider moves.
+        resize_gaming(&mut l, 1920, 1080).unwrap();
         assert_eq!(
-            r,
+            rects(&l),
             [
                 Rect::new(0, 0, 1597, 2500),
                 Rect::new(1597, 0, 4547, 710),     // above
@@ -919,43 +1396,98 @@ mod tests {
                 Rect::new(4032, 710, 4547, 1790),  // right
                 Rect::new(1597, 1790, 4547, 2500), // below
                 Rect::new(4547, 0, 6144, 2500),
-                Rect::new(2112, 710, 4032, 1790), // the gaming zone, centred in the column
+                Rect::new(2112, 710, 4032, 1790), // the gaming zone
             ]
         );
-        let labels: Vec<String> = (0..zones.len()).map(|i| crate::layout::zone_label(&zones, i)).collect();
-        assert_eq!(labels, ["1", "2", "3", "4", "5", "6", "G"]);
-        // Placed by pixels, it's relative to its space (the column).
-        l.gaming_zones[0].x = Position::Px(0);
-        assert_eq!(rects(&l)[6].left, 1597);
-        assert_eq!(rects(&l)[2].width(), 0);
-
-        // Turning it back gives the original layout.
+        // Fill its space again.
+        let mut full = l.clone();
+        fill_space(&mut full, WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&full), Rect::new(1597, 0, 4547, 2500));
+        // Back to one zone where the column was.
         remove_gaming_zone(&mut l, WORK, MONITOR).unwrap();
-        assert_eq!(l, slay);
+        assert_eq!(rects(&l), rects(&slay));
         assert_eq!(make_gaming_zone(&mut l, 9, WORK, MONITOR), Err(EditError::NoSuchZone(9)));
     }
 
     #[test]
-    fn gaming_zone_space_follows_its_dividers() {
+    fn the_gaming_zone_keeps_its_size() {
+        // Tom: sizing up the zones around it mustn't resize it; it's pushed instead.
+        let mut l = three_columns(); // 2000 | 2000 | 2144
+        make_gaming_zone(&mut l, 1, WORK, MONITOR).unwrap();
+        // It fills its space: dragging the left divider right pushes it straight away.
+        move_divider(&mut l, "g1", 2300, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2300, 0, 4300, 2500));
+        assert_eq!((rects(&l)[0].width(), rects(&l)[5].width()), (2300, 1844));
+        // Typing the left zone's width does the same.
+        resize_zone(&mut l, 0, Axis::Vertical, 2400, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2400, 0, 4400, 2500));
+        // Making it smaller (typed or dragged) leaves it where it is, with a leftover zone beside it.
+        resize_zone(&mut l, 0, Axis::Vertical, 2028, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2400, 0, 4400, 2500));
+        assert_eq!(rects(&l)[2], Rect::new(2028, 0, 2400, 2500)); // left of it
+                                                                  // Dragging back in closes that first, then pushes.
+        move_divider(&mut l, "g1", 2500, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2500, 0, 4500, 2500));
+        assert!(rects(&l)[2].is_empty());
+        // Pushed as far as the zone beyond allows (10 px left of it).
+        move_divider(&mut l, "g1", 6000, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(4134, 0, 6134, 2500));
+    }
+
+    #[test]
+    fn moving_the_gaming_zone_pushes_its_neighbours() {
         let mut l = three_columns();
         make_gaming_zone(&mut l, 1, WORK, MONITOR).unwrap();
-        l.gaming_zones[0].size = GamingSize::Pixels { w: 1600, h: 900 };
-        // Dragging the space's left divider: the gaming zone stays centred in it, and the
-        // strips beside it don't stop the drag.
+        resize_gaming(&mut l, 1600, 900).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2200, 800, 3800, 1700));
+        // Across: its space (and the dividers around it) moves with it.
+        move_gaming_zone(&mut l, 300, 0, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2500, 800, 4100, 1700));
+        let r = rects(&l);
+        assert_eq!((r[0].width(), r[1], r[5].width()), (2300, Rect::new(2300, 0, 4300, 800), 1844));
+        // Down: the column is the full height, so the strips above and below change.
+        move_gaming_zone(&mut l, 0, 10_000, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2500, 1600, 4100, 2500));
+        assert!(rects(&l)[4].is_empty());
+        // Left as far as zone 1 allows (10 px).
+        move_gaming_zone(&mut l, -10_000, 0, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l).left, 210);
+        // A locked zone beyond can't be pushed against the screen's edge.
+        let mut l = three_columns();
+        make_gaming_zone(&mut l, 1, WORK, MONITOR).unwrap();
+        assert_eq!(move_gaming_zone(&mut l, 100, 0, &[5], WORK, MONITOR), Err(EditError::Locked(5)));
+        // Growing past its space pushes the dividers out.
+        resize_gaming(&mut l, 2560, 1440).unwrap();
+        assert_eq!(gaming(&l), Rect::new(1720, 530, 4280, 1970));
+        assert_eq!((rects(&l)[0].width(), rects(&l)[5].width()), (1720, 1864));
+    }
+
+    #[test]
+    fn merging_beside_the_gaming_zone_keeps_dividers() {
+        // Tom: after merging, the dividers couldn't be grabbed.
+        let mut l = three_columns();
+        split(&mut l, 0, Axis::Horizontal, 1000, WORK, MONITOR).unwrap(); // left column in two
+        make_gaming_zone(&mut l, 2, WORK, MONITOR).unwrap();
+        // Merging the left column's halves mustn't take in the empty strip beside the gaming
+        // zone (or its edge): the merged zone still ends at g1.
+        let i = merge(&mut l, &[0, 1], WORK, MONITOR).unwrap();
+        assert_eq!(l.zones[i].right, "g1");
+        assert_eq!(l.zones.len(), 6);
         let positions = l.guide_positions(WORK, MONITOR).unwrap();
-        assert_eq!(guide_limits(&l, &positions, "g1", &[], WORK, 10), (10, 3990));
-        move_divider(&mut l, "g1", 1800, &[], WORK, MONITOR).unwrap();
-        assert_eq!(rects(&l).last(), Some(&Rect::new(2100, 800, 3700, 1700)));
-        // A space smaller than the gaming zone shrinks it.
-        move_divider(&mut l, "g1", 3000, &[], WORK, MONITOR).unwrap();
-        assert_eq!(rects(&l).last(), Some(&Rect::new(3000, 800, 4000, 1700)));
-        // Splitting a leftover strip still turns back into the one zone.
+        let g1 = dividers(&l, &positions).into_iter().find(|d| d.guide == "g1").unwrap();
+        assert!(g1.spans.contains(&(0, 2500)), "{g1:?}");
+    }
+
+    #[test]
+    fn only_the_zones_own_sides_follow_it() {
+        // g2 is a split between g1 and the right edge; making zone 1 the gaming zone makes g1
+        // follow it, but g2 stays where it is.
         let mut l = three_columns();
-        make_gaming_zone(&mut l, 1, WORK, MONITOR).unwrap();
-        l.gaming_zones[0].size = GamingSize::Pixels { w: 1600, h: 900 };
-        split(&mut l, 1, Axis::Vertical, 3000, WORK, MONITOR).unwrap(); // the strip above
-        remove_gaming_zone(&mut l, WORK, MONITOR).unwrap();
-        assert_eq!(l, three_columns());
+        make_gaming_zone(&mut l, 0, WORK, MONITOR).unwrap();
+        assert!(!follows_gaming(&l, "g2"));
+        move_divider(&mut l, "g1", 2500, &[], WORK, MONITOR).unwrap(); // a leftover strip opens
+        assert_eq!(l.guide_positions(WORK, MONITOR).unwrap()["g2"].1, 4000);
+        assert_eq!(gaming(&l), Rect::new(0, 0, 2000, 2500));
     }
 
     #[test]
@@ -963,15 +1495,189 @@ mod tests {
         let mut l = new_layout("t", "T");
         make_gaming_zone(&mut l, 0, WORK, MONITOR).unwrap();
         assert!(l.validate().is_ok());
-        l.gaming_zones[0].size = GamingSize::Pixels { w: 3840, h: 2160 };
-        let mut b = new_layout("t", "T");
-        add_gaming_zone(&mut b, GamingSize::Pixels { w: 3840, h: 2160 });
-        assert_eq!(rects(&l)[4], rects(&b)[1]);
+        resize_gaming(&mut l, 3840, 2160).unwrap();
+        assert_eq!(gaming(&l), Rect::new(1152, 170, 4992, 2330));
         assert_eq!(rects(&l)[0], Rect::new(0, 0, 6144, 170));
-        // Over the taskbar: its space reaches the area's bottom, so it may go to the monitor's.
-        l.gaming_over_taskbar = true;
-        l.gaming_zones[0].size = GamingSize::Pixels { w: 4552, h: 2560 };
-        assert_eq!(rects(&l)[4], Rect::new(796, 0, 5348, 2560));
+        remove_gaming_zone(&mut l, WORK, MONITOR).unwrap();
+        assert_eq!(l, new_layout("t", "T"));
+    }
+
+    /// Random edits, as a person might make them, each checked like the editor does (a
+    /// failed edit changes nothing). After each one the zones and the gaming zone must still
+    /// tile the screen exactly, and only resizing it may change the gaming zone's size.
+    #[test]
+    fn random_edits_keep_the_layout_whole() {
+        // GZ_SEED tries other sequences (from WSL: WSLENV=GZ_SEED GZ_SEED=7 cargo test random).
+        let mut seed: u64 = std::env::var("GZ_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0x5EED_1234_ABCD_0001);
+        let mut rnd = |n: i32| -> i32 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) % n.max(1) as u64) as i32
+        };
+        let mut refused = 0;
+        for run in 0..20 {
+            let mut l = new_layout("t", "T");
+            for step in 0..120 {
+                let before = l.clone();
+                let size_before = l.gaming_rects(WORK, MONITOR).unwrap().first().map(|g| (g.width(), g.height()));
+                let zones = l.resolve(WORK, MONITOR, 0).unwrap();
+                let count = l.zones.len() as i32;
+                let pick = rnd(count) as usize;
+                let op = rnd(9);
+                let result = match op {
+                    0 | 1 => {
+                        let r = zones[pick].rect;
+                        let axis = if rnd(2) == 0 { Axis::Vertical } else { Axis::Horizontal };
+                        let (a, b) = span(r, axis);
+                        if b - a > 2 * MIN_ZONE_PX {
+                            split(&mut l, pick, axis, a + MIN_ZONE_PX + rnd(b - a - 2 * MIN_ZONE_PX), WORK, MONITOR)
+                                .map(|_| ())
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    2 => merge(&mut l, &[pick, rnd(count) as usize], WORK, MONITOR).map(|_| ()),
+                    3 => make_gaming_zone(&mut l, pick, WORK, MONITOR),
+                    4 if !l.guides.is_empty() => {
+                        let g = l.guides[rnd(l.guides.len() as i32) as usize].clone();
+                        let (s, e) = span(WORK, g.axis);
+                        let locked: Vec<usize> = (0..count as usize).filter(|_| rnd(4) == 0).collect();
+                        move_divider(&mut l, &g.id, s + rnd(e - s), &locked, WORK, MONITOR)
+                    }
+                    5 => move_gaming_zone(&mut l, rnd(3000) - 1500, rnd(2000) - 1000, &[], WORK, MONITOR),
+                    6 if !l.gaming_zones.is_empty() => {
+                        resize_gaming(&mut l, 200 + rnd(4000) as u32, 200 + rnd(2400) as u32)
+                    }
+                    7 => resize_zone(&mut l, pick, Axis::Vertical, MIN_ZONE_PX + rnd(3000), &[], WORK, MONITOR),
+                    8 if rnd(4) == 0 => remove_gaming_zone(&mut l, WORK, MONITOR),
+                    _ => Ok(()),
+                };
+                let what = format!("run {run} step {step} op {op}");
+                if std::env::var("GZ_TRACE").ok() == Some(run.to_string()) {
+                    eprintln!("=== {what} {result:?}\n{l:?}");
+                }
+                // As in the editor: chance meetings are joined, and a change that leaves the
+                // layout coming apart is refused.
+                if result.is_ok() && l != before {
+                    join_coincident(&mut l, WORK, MONITOR);
+                }
+                let result = match result {
+                    Ok(()) if l.validate().is_ok() && !stays_whole(&l, WORK, MONITOR) => {
+                        refused += 1;
+                        Err(EditError::ComesApart)
+                    }
+                    r => r,
+                };
+                if result.is_err() || l.validate().is_err() {
+                    assert!(l.validate().is_ok() || result.is_err(), "{what}: {:?}\n{l:#?}", l.validate());
+                    l = before;
+                    continue;
+                }
+                let zones = l.resolve(WORK, MONITOR, 0).unwrap();
+                let rects: Vec<Rect> = zones.iter().map(|z| z.rect).filter(|r| !r.is_empty()).collect();
+                let area = |r: &Rect| r.width() as i64 * r.height() as i64;
+                let overlap = |a: &Rect, b: &Rect| {
+                    a.left.max(b.left) < a.right.min(b.right) && a.top.max(b.top) < a.bottom.min(b.bottom)
+                };
+                for (n, a) in rects.iter().enumerate() {
+                    assert!(
+                        a.left >= 0 && a.top >= 0 && a.right <= 6144 && a.bottom <= 2500,
+                        "{what}: {a:?} sticks out\n{l:#?}"
+                    );
+                    for b in &rects[n + 1..] {
+                        assert!(!overlap(a, b), "{what}: {a:?} overlaps {b:?}\nbefore {before:#?}\nafter {l:#?}");
+                    }
+                }
+                assert_eq!(
+                    rects.iter().map(area).sum::<i64>(),
+                    area(&WORK),
+                    "{what}: gaps\nbefore {before:#?}\nafter {l:#?}"
+                );
+                // Zones meeting along a line must share the guide there, or dragging it
+                // pulls them apart.
+                for (a, za) in l.zones.iter().enumerate() {
+                    for (b, zb) in l.zones.iter().enumerate() {
+                        let (ra, rb) = (zones[a].rect, zones[b].rect);
+                        if ra.is_empty() || rb.is_empty() {
+                            continue;
+                        }
+                        // (Empty zones between them still hold them apart.)
+                        let between = |near: &String, far: &String, vertical: bool| {
+                            let mut reached = vec![near.clone()];
+                            for _ in 0..l.zones.len() {
+                                for (z, r) in l.zones.iter().zip(&zones) {
+                                    let (a, b) = if vertical { (&z.left, &z.right) } else { (&z.top, &z.bottom) };
+                                    if r.rect.is_empty() && reached.contains(a) && !reached.contains(b) {
+                                        reached.push(b.clone());
+                                    }
+                                }
+                            }
+                            reached.contains(far)
+                        };
+                        let across = ra.right == rb.left
+                            && ra.top.max(rb.top) < ra.bottom.min(rb.bottom)
+                            && za.right != zb.left
+                            && !between(&za.right, &zb.left, true);
+                        let down = ra.bottom == rb.top
+                            && ra.left.max(rb.left) < ra.right.min(rb.right)
+                            && za.bottom != zb.top
+                            && !between(&za.bottom, &zb.top, false);
+                        assert!(
+                            !across && !down,
+                            "{what}: zones {a} and {b} meet on two guides\nbefore {before:#?}\nafter {l:#?}"
+                        );
+                    }
+                }
+                let size_after = l.gaming_rects(WORK, MONITOR).unwrap().first().map(|g| (g.width(), g.height()));
+                if op != 6 && size_before.is_some() && size_after.is_some() {
+                    assert_eq!(
+                        size_before, size_after,
+                        "{what}: the gaming zone was resized\nbefore {before:#?}\nafter {l:#?}"
+                    );
+                }
+            }
+        }
+        // Rare: only odd sequences of edits get there.
+        assert!(refused < 30, "{refused} edits refused");
+        eprintln!("random edits: {refused} refused as coming apart");
+    }
+
+    /// Checks a real layouts.json (GZ_LAYOUTS = its path): every layout loads, and says which
+    /// ones come apart when something moves, before and after joining chance meetings.
+    #[test]
+    #[ignore = "needs GZ_LAYOUTS"]
+    fn check_a_layouts_file() {
+        let path = std::env::var("GZ_LAYOUTS").expect("GZ_LAYOUTS");
+        let file = LayoutsFile::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        for l in &file.layouts {
+            let mut joined = l.clone();
+            let changed = join_coincident(&mut joined, WORK, MONITOR);
+            eprintln!(
+                "{:<20} whole: {:<5} joined: {:<5} whole after: {}",
+                l.name,
+                stays_whole(l, WORK, MONITOR),
+                changed,
+                stays_whole(&joined, WORK, MONITOR)
+            );
+        }
+    }
+
+    #[test]
+    fn joining_guides_that_meet_by_chance() {
+        // Tom's "Six Panel": the middle column's two zones meet at 50 % on two guides.
+        let mut l = three_columns();
+        l.guides.push(Guide { id: "a".into(), axis: Axis::Horizontal, anchor: Anchor::Percent(50.0) });
+        l.guides.push(Guide { id: "b".into(), axis: Axis::Horizontal, anchor: Anchor::Percent(50.0) });
+        let mid = l.zones[1].clone();
+        l.zones[1] = Zone { bottom: "a".into(), ..mid.clone() };
+        l.zones.insert(2, Zone { top: "b".into(), ..mid });
+        assert!(!stays_whole(&l, WORK, MONITOR));
+        let before = rects(&l);
+        assert!(join_coincident(&mut l, WORK, MONITOR));
+        assert_eq!(l.zones[2].top, "a");
+        assert!(!l.guides.iter().any(|g| g.id == "b"));
+        assert_eq!(rects(&l), before);
+        assert!(stays_whole(&l, WORK, MONITOR));
+        assert!(!join_coincident(&mut l, WORK, MONITOR));
     }
 
     #[test]

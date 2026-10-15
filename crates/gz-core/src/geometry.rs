@@ -46,6 +46,16 @@ impl Rect {
         )
     }
 
+    /// The part both cover (empty, possibly inverted, if they don't overlap).
+    pub fn intersect(&self, other: &Rect) -> Rect {
+        Rect::new(
+            self.left.max(other.left),
+            self.top.max(other.top),
+            self.right.min(other.right),
+            self.bottom.min(other.bottom),
+        )
+    }
+
     pub const fn offset(&self, dx: i32, dy: i32) -> Rect {
         Rect::new(self.left + dx, self.top + dy, self.right + dx, self.bottom + dy)
     }
