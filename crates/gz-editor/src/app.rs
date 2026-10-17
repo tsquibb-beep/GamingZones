@@ -16,6 +16,7 @@ use crate::canvas::CanvasDrag;
 use crate::capture::{self, WindowEntry};
 use crate::core_link;
 use crate::doc::{Doc, Files, Stamps};
+use crate::help;
 use crate::icons::{self, Icon};
 use crate::monitors::{self, Monitor};
 use crate::style;
@@ -91,6 +92,13 @@ pub struct Editor {
     pub(crate) renaming: Option<(usize, String)>,
     /// Renaming just started: focus the name box.
     pub(crate) rename_focus: bool,
+    /// Clicking a zone splits it top and bottom (true) or side by side. Tapping Shift flips it.
+    pub(crate) split_rows: bool,
+    /// Shift was down last frame, and whether anything else was pressed while it was.
+    shift_held: bool,
+    shift_used: bool,
+    /// The "How to edit" overlay is open.
+    pub(crate) help_open: bool,
     /// Where the canvas drew the monitor last frame (for the UI tests).
     pub(crate) canvas_monitor: egui::Rect,
     /// Tell the tray app to reload after writing (off in the UI tests).
@@ -153,6 +161,10 @@ impl Editor {
             locked: Vec::new(),
             renaming: None,
             rename_focus: false,
+            split_rows: false,
+            shift_held: false,
+            shift_used: false,
+            help_open: false,
             canvas_monitor: egui::Rect::NOTHING,
             notify_tray: true,
         };
@@ -635,8 +647,12 @@ impl Editor {
         if save && self.dirty() && self.dialog.is_none() {
             self.save(false);
         }
+        let tapped = self.shift_tapped(ctx);
         if ctx.egui_wants_keyboard_input() {
             return;
+        }
+        if tapped {
+            self.split_rows = !self.split_rows;
         }
         let (redo_shift, undo, redo, delete, escape) = ctx.input_mut(|i| {
             (
@@ -659,6 +675,20 @@ impl Editor {
         if escape {
             self.selection = Selection::None;
         }
+    }
+
+    /// Shift was pressed and let go, with nothing else (a key, a click, Ctrl or Alt) in between.
+    fn shift_tapped(&mut self, ctx: &egui::Context) -> bool {
+        let (shift, other) = ctx.input(|i| {
+            let pressed = i.events.iter().any(|e| {
+                matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::PointerButton { pressed: true, .. })
+            });
+            (i.modifiers.shift, pressed || i.modifiers.command || i.modifiers.alt)
+        });
+        let tapped = self.shift_held && !shift && !self.shift_used && !other;
+        self.shift_used = shift && ((self.shift_held && self.shift_used) || other);
+        self.shift_held = shift;
+        tapped
     }
 
     fn handle_close(&mut self, ctx: &egui::Context) {
@@ -700,6 +730,27 @@ impl Editor {
             {
                 self.preview_on = !self.preview_on;
             }
+            let (split, tip) = if self.split_rows {
+                (
+                    "Split: top and bottom",
+                    "Clicking a zone splits it into top and bottom. Tap Shift or click here to switch.",
+                )
+            } else {
+                ("Split: side by side", "Clicking a zone splits it side by side. Tap Shift or click here to switch.")
+            };
+            if icons::button(ui, Icon::Split(self.split_rows), 26.0, Some(split), "Split direction", false, true)
+                .on_hover_text(tip)
+                .clicked()
+            {
+                self.split_rows = !self.split_rows;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::button(ui, Icon::Help, 26.0, Some("How to edit"), "How to edit", self.help_open, true)
+                    .clicked()
+                {
+                    self.help_open = !self.help_open;
+                }
+            });
         });
         ui.add_space(4.0);
     }
@@ -711,8 +762,6 @@ impl Editor {
         self.layout_props(ui);
         ui.separator();
         self.selection_props(ui);
-        ui.separator();
-        help(ui);
     }
 
     fn layout_props(&mut self, ui: &mut egui::Ui) {
@@ -1088,23 +1137,6 @@ pub fn number_box<N: egui::emath::Numeric>(
     .inner
 }
 
-fn help(ui: &mut egui::Ui) {
-    egui::CollapsingHeader::new("How to edit").default_open(false).show(ui, |ui| {
-        for line in [
-            "Click a zone to split it. Hold Shift to split it the other way.",
-            "Drag a divider to move it. Click it to type an exact position.",
-            "Ctrl+click zones, or drag across them, to select them. Then Merge or Delete.",
-            "Select a zone to type its exact width or height. Click a zone's padlock to keep its size: dividers next to it push it along.",
-            "Select a zone and make it the gaming zone. Make the gaming zone smaller and the rest of that space becomes zones.",
-            "Drag the gaming zone to move it: the zones beside it make room.",
-            "Right-click a layout to rename, copy or delete it, or to use it on a monitor. Double-click its name to rename it.",
-            "Ctrl+Z / Ctrl+Y undo and redo. Ctrl+S saves.",
-        ] {
-            ui.label(format!("• {line}"));
-        }
-    });
-}
-
 impl eframe::App for Editor {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
@@ -1140,6 +1172,9 @@ impl Editor {
             .show(ui, |ui| self.footer(ui));
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.dialogs(&ctx);
+        if self.help_open {
+            self.help_open = help::show(&ctx);
+        }
         self.sync_preview();
         // Forget locks on zones that no longer exist (split, merged, deleted).
         let layouts = &self.doc.layouts.layouts;

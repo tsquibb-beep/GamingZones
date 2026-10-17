@@ -22,6 +22,10 @@ pub enum Icon {
     Plus,
     /// An X, for removing something.
     Cross,
+    /// A question mark in a circle.
+    Help,
+    /// A box split in two: side by side (false) or top and bottom (true).
+    Split(bool),
 }
 
 /// Points along a quadratic Bézier curve.
@@ -111,6 +115,18 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
         Icon::Plus => {
             painter.line_segment([p(0.5, 0.18), p(0.5, 0.82)], line);
             painter.line_segment([p(0.18, 0.5), p(0.82, 0.5)], line);
+        }
+        Icon::Help => {
+            painter.circle_stroke(p(0.5, 0.5), s * 0.4, line);
+            painter.text(p(0.5, 0.52), Align2::CENTER_CENTER, "?", style::semibold(s * 0.5), colour);
+        }
+        Icon::Split(rows) => {
+            painter.rect_stroke(r(0.1, 0.18, 0.9, 0.82), s * 0.06, line, StrokeKind::Middle);
+            if rows {
+                painter.line_segment([p(0.1, 0.5), p(0.9, 0.5)], line);
+            } else {
+                painter.line_segment([p(0.5, 0.18), p(0.5, 0.82)], line);
+            }
         }
         Icon::Cross => {
             painter.line_segment([p(0.22, 0.22), p(0.78, 0.78)], line);

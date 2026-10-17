@@ -473,3 +473,52 @@ fn stopping_a_layout_on_a_monitor() {
     assert!(h.query_by_label("Used on:").is_none());
     h.get_by_label("Use on this monitor");
 }
+
+/// Presses and lets go of Shift on its own.
+fn tap_shift(h: &mut Harness<'_, Editor>) {
+    h.event(Event::ModifiersChanged(Modifiers::SHIFT));
+    h.run_steps(1);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(1);
+}
+
+#[test]
+fn tapping_shift_switches_the_split_direction() {
+    let mut h = harness(three_columns());
+    assert!(!h.state().split_rows);
+    tap_shift(&mut h);
+    assert!(h.state().split_rows);
+    // Clicking now splits the zone top and bottom, without holding Shift.
+    let zone = zone_on_canvas(&h, 0);
+    click_at(&mut h, zone.center());
+    let zones = h.state().current().resolve(WORK, MONITOR, 0).unwrap();
+    assert_eq!(zones.len(), 4);
+    assert_eq!((zones[0].rect.width(), zones[1].rect.width()), (2000, 2000), "{zones:?}");
+    // Shift as part of Ctrl+Shift+Z isn't a tap.
+    let held = Modifiers::COMMAND | Modifiers::SHIFT;
+    h.event(Event::ModifiersChanged(held));
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(Event::Key { key: Key::Z, physical_key: None, pressed, repeat: false, modifiers: held });
+        h.run_steps(1);
+    }
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(2);
+    assert!(h.state().split_rows);
+    // The top bar's button switches it back.
+    h.get_by_label("Split direction").click();
+    h.run_steps(2);
+    assert!(!h.state().split_rows);
+}
+
+#[test]
+fn how_to_edit_opens_from_the_top_bar() {
+    let mut h = harness(three_columns());
+    assert!(h.query_by_label("Clear the selection").is_none());
+    h.get_by_label("How to edit").click();
+    h.run_steps(2);
+    h.get_by_label("Clear the selection");
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Clear the selection").is_none());
+}

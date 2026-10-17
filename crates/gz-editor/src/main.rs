@@ -12,6 +12,7 @@ mod capture;
 mod core_link;
 mod doc;
 mod gaming;
+mod help;
 mod icons;
 mod list;
 mod monitors;

@@ -169,7 +169,8 @@ impl Editor {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let view = View::fit(response.rect.shrink(16.0), monitor);
         self.canvas_monitor = view.rect(monitor);
-        let (shift, ctrl) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+        let ctrl = ui.input(|i| i.modifiers.command);
+        let rows = self.split_rows;
 
         // Input, against the layout as it was at the start of the frame.
         {
@@ -244,7 +245,7 @@ impl Editor {
                         }
                         Target::Zone(i) => {
                             let (x, y) = view.px(p);
-                            self.split_at(i, x, y, shift, zones[i].rect);
+                            self.split_at(i, x, y, rows, zones[i].rect);
                         }
                         Target::Nothing => self.selection = Selection::None,
                     }
@@ -350,7 +351,7 @@ impl Editor {
         if let (Target::Zone(i), Some(p), false) = (&hover, hover_pos, ctrl) {
             let zr = view.rect(zones[*i].rect);
             let (x, y) = view.px(p);
-            let (ends, text) = if shift {
+            let (ends, text) = if rows {
                 ([egui::pos2(zr.left(), p.y), egui::pos2(zr.right(), p.y)], format!("y = {}", y - work.top))
             } else {
                 ([egui::pos2(p.x, zr.top()), egui::pos2(p.x, zr.bottom())], format!("x = {}", x - work.left))
@@ -396,7 +397,7 @@ impl Editor {
         });
     }
 
-    /// Splits zone `i` at (`x`, `y`): vertically, or horizontally with Shift.
+    /// Splits zone `i` at (`x`, `y`): side by side, or top and bottom if `horizontal`.
     fn split_at(&mut self, i: usize, x: i32, y: i32, horizontal: bool, zone: Rect) {
         let axis = if horizontal { Axis::Horizontal } else { Axis::Vertical };
         let (pos, lo, hi) = match axis {
