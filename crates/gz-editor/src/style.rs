@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use eframe::egui::epaint::text::VariationCoords;
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId, FontTweak, TextStyle, Vec2};
+use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId, FontTweak, TextStyle, Vec2};
 
 /// Lexend, a variable font (weight 100–900, 400 by default). SIL Open Font License 1.1.
 const LEXEND: &[u8] = include_bytes!("../../../res/fonts/Lexend-VariableFont_wght.ttf");
@@ -22,6 +22,13 @@ pub const BUTTON_W: f32 = 150.0;
 pub const DIALOG_W: f32 = 96.0;
 /// Height of a row of controls.
 pub const ROW_H: f32 = 24.0;
+
+/// The green of the gaming zone (and the logo), for buttons that make one.
+pub const GREEN: Color32 = Color32::from_rgb(0x27, 0xA0, 0x60);
+/// Red, for buttons that throw something away.
+pub const RED: Color32 = Color32::from_rgb(0xC8, 0x3C, 0x3C);
+/// [`RED`] under the mouse, for small red icons that need to stand out on hover.
+pub const RED_HOVER: Color32 = Color32::from_rgb(0xFF, 0x5A, 0x5A);
 
 /// Text in Lexend SemiBold.
 pub fn semibold(size: f32) -> FontId {
@@ -62,6 +69,13 @@ pub fn sized_button(ui: &mut egui::Ui, text: &str, width: f32) -> egui::Response
     // A stretchy gap either side keeps the text centred in the wider button.
     let atoms = (egui::Atom::grow(), text, egui::Atom::grow());
     ui.add(egui::Button::new(atoms).min_size(Vec2::new(width, ROW_H)))
+}
+
+/// A button as wide as the panel, filled with `fill`, with white text.
+pub fn wide_coloured_button(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {
+    let text = egui::RichText::new(text).color(Color32::WHITE);
+    let atoms = (egui::Atom::grow(), text, egui::Atom::grow());
+    ui.add(egui::Button::new(atoms).fill(fill).min_size(Vec2::new(ui.available_width(), ROW_H)))
 }
 
 /// A button of the ordinary width.

@@ -9,6 +9,7 @@ use gz_core::Rect;
 
 use crate::app::{Editor, Selection, MIN_ZONE_PX};
 use crate::icons::{self, Icon};
+use crate::style;
 
 pub const ZONE_FILL: Color32 = Color32::from_rgb(0x3B, 0x46, 0x60);
 pub const DISABLED_FILL: Color32 = Color32::from_rgb(0x46, 0x46, 0x46);
@@ -379,10 +380,13 @@ impl Editor {
                 if !self.dirty() {
                     return;
                 }
-                if icons::labelled(ui, Icon::Save, "Save", true).on_hover_text("Ctrl+S").clicked() {
+                if icons::labelled(ui, Icon::Save, "Save", Some(ui.visuals().selection.bg_fill))
+                    .on_hover_text("Ctrl+S")
+                    .clicked()
+                {
                     self.save(false);
                 }
-                if icons::labelled(ui, Icon::Bin, "Discard", false)
+                if icons::labelled(ui, Icon::Bin, "Discard", Some(style::RED))
                     .on_hover_text("Throw away the changes to this layout since it was last saved.")
                     .clicked()
                 {

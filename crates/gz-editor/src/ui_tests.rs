@@ -456,3 +456,20 @@ fn gaming_zone_options_only_while_it_is_selected() {
     select(&mut h, Selection::Gaming);
     h.get_by_label("Turn it back into a normal zone");
 }
+
+#[test]
+fn stopping_a_layout_on_a_monitor() {
+    let mut h = harness_with(two_layouts());
+    assert!(h.query_by_label_contains("Stop using it on").is_none(), "the X shows on hover only");
+    // The "Used on" line (the top bar's monitor button is the first).
+    let line = h.get_all_by_label_contains("1 · DELL").last().unwrap().rect();
+    h.hover_at(line.center());
+    h.run_steps(2);
+    h.get_by_label_contains("Stop using it on").click();
+    h.run_steps(2);
+    assert_eq!(h.state().doc.applied.layout_for("TEST-DELL"), None);
+    let applied = std::fs::read_to_string(h.state().files.applied_path()).unwrap();
+    assert!(applied.contains("\"layout\": null"), "{applied}");
+    assert!(h.query_by_label("Used on:").is_none());
+    h.get_by_label("Use on this monitor");
+}

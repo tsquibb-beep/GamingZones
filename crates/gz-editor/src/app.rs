@@ -22,6 +22,8 @@ use crate::style;
 
 /// Smallest zone (px) a split or divider drag may leave.
 pub const MIN_ZONE_PX: i32 = edit::MIN_ZONE_PX;
+/// Height of a line under "Used on:".
+const USED_ROW_H: f32 = 22.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Selection {
@@ -532,8 +534,20 @@ impl Editor {
         });
     }
 
-    /// Monitors (connected or remembered in applied.json) whose entry uses layout `id`.
-    fn used_on(&self, id: &str) -> Vec<String> {
+    /// Leaves the monitor `monitor_id` with no zones (its applied.json entry says no layout).
+    fn stop_using_on(&mut self, monitor_id: &str) {
+        let name = match self.monitors.iter().find(|m| m.id == monitor_id) {
+            Some(m) => m.name.clone(),
+            None => self.doc.applied.monitors.get(monitor_id).map(|e| e.name.clone()).unwrap_or_default(),
+        };
+        self.commit(|d| {
+            d.applied.monitors.insert(monitor_id.to_string(), MonitorEntry { layout: None, name: name.clone() });
+        });
+    }
+
+    /// Monitors (connected or remembered in applied.json) whose entry uses layout `id`: their
+    /// ids and how to show them.
+    fn used_on(&self, id: &str) -> Vec<(String, String)> {
         let applied = &self.doc.applied;
         // Connected monitors, including those on the default layout (no entry of their own).
         let connected = self
@@ -541,18 +555,20 @@ impl Editor {
             .iter()
             .enumerate()
             .filter(|(_, m)| applied.layout_for(&m.id) == Some(id))
-            .map(|(n, m)| m.label(n));
+            .map(|(n, m)| (m.id.clone(), m.label(n)));
         let remembered = applied
             .monitors
             .iter()
             .filter(|(mid, e)| e.layout.as_deref() == Some(id) && !self.monitors.iter().any(|m| &m.id == *mid))
-            .map(|(mid, e)| format!("{} (not connected)", if e.name.is_empty() { mid } else { &e.name }));
+            .map(|(mid, e)| {
+                (mid.clone(), format!("{} (not connected)", if e.name.is_empty() { mid } else { &e.name }))
+            });
         connected.chain(remembered).collect()
     }
 
     fn delete_layout(&mut self, i: usize) {
         let id = self.doc.layouts.layouts[i].id.clone();
-        let used = self.used_on(&id);
+        let used: Vec<String> = self.used_on(&id).into_iter().map(|(_, text)| text).collect();
         if self.doc.layouts.layouts.len() == 1 {
             self.set_error("There has to be at least one layout.");
             return;
@@ -713,11 +729,26 @@ impl Editor {
         let used = self.used_on(&id);
         if !used.is_empty() {
             ui.label("Used on:");
-            for text in used {
-                ui.horizontal(|ui| {
+            for (monitor_id, text) in used {
+                // The X to stop using it there shows while the mouse is over the line.
+                let row = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), USED_ROW_H));
+                let hovered = ui.rect_contains_pointer(row);
+                let layout = egui::Layout::left_to_right(egui::Align::Center);
+                ui.allocate_ui_with_layout(row.size(), layout, |ui| {
+                    ui.set_min_size(row.size());
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                     icons::paint(ui.painter(), r, Icon::Monitor(0), ui.visuals().text_color());
-                    ui.label(text);
+                    ui.label(&text);
+                    if hovered {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icons::remove_button(ui, &format!("Stop using it on {text}"))
+                                .on_hover_text("Stop using this layout there. That monitor has no zones until you pick another layout for it.")
+                                .clicked()
+                            {
+                                self.stop_using_on(&monitor_id);
+                            }
+                        });
+                    }
                 });
             }
         }
@@ -788,7 +819,7 @@ impl Editor {
         }
         if self.current().gaming_zones.is_empty() {
             ui.add_space(4.0);
-            if style::wide_button(ui, &format!("Make zone {name} the gaming zone"))
+            if style::wide_coloured_button(ui, &format!("Make zone {name} the gaming zone"), style::GREEN)
                 .on_hover_text(
                     "A zone of an exact size (a game's resolution). It takes this zone's space; make it smaller \
                      and the rest of that space becomes normal zones.",
@@ -838,8 +869,13 @@ impl Editor {
             Axis::Vertical => ("left", "width"),
             Axis::Horizontal => ("top", "height"),
         };
-        ui.heading("Divider");
-        ui.label(RichText::new(format!("\"{id}\", {}", guide.axis.name())).weak());
+        let kind = match &guide.anchor {
+            Anchor::Px(px) => format!("{px} px from the {edge} on every monitor"),
+            Anchor::Percent(p) => format!("{p} % of the {dimension} on every monitor"),
+            Anchor::Between { a, b, fraction } => format!("{fraction} of the way from \"{a}\" to \"{b}\""),
+            Anchor::Offset { from, px } => format!("{px} px from \"{from}\""),
+        };
+        ui.heading("Divider").on_hover_text(format!("\"{id}\", {}: {kind}", guide.axis.name()));
         let mut px = pos - start;
         if number_box(ui, &format!("From the {edge}"), &mut px, |d| d.range(0..=len).suffix(" px")) {
             self.move_divider(id, start + px);
@@ -849,15 +885,6 @@ impl Editor {
         if number_box(ui, &pct_label, &mut percent, |d| d.range(0.0..=100.0).speed(0.05).max_decimals(3).suffix(" %")) {
             self.move_divider(id, start + (len as f64 * percent / 100.0).round() as i32);
         }
-        let kind = match &guide.anchor {
-            Anchor::Px(px) => format!("Fixed: {px} px from the {edge} on every monitor."),
-            Anchor::Percent(p) => format!("{p} % of the {dimension} on every monitor."),
-            Anchor::Between { a, b, fraction } => {
-                format!("A split: {fraction} of the way from \"{a}\" to \"{b}\", so it moves with them.")
-            }
-            Anchor::Offset { from, px } => format!("{px} px from \"{from}\"."),
-        };
-        ui.label(kind);
         if let Anchor::Between { fraction, .. } = guide.anchor {
             let mut f = fraction;
             if number_box(ui, "Fraction", &mut f, |d| d.range(0.0..=1.0).speed(0.001).max_decimals(4)) {

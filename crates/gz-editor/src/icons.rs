@@ -20,6 +20,8 @@ pub enum Icon {
     /// A padlock: closed (true) or open.
     Lock(bool),
     Plus,
+    /// An X, for removing something.
+    Cross,
 }
 
 /// Points along a quadratic Bézier curve.
@@ -110,6 +112,10 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, colour: Color32) {
             painter.line_segment([p(0.5, 0.18), p(0.5, 0.82)], line);
             painter.line_segment([p(0.18, 0.5), p(0.82, 0.5)], line);
         }
+        Icon::Cross => {
+            painter.line_segment([p(0.22, 0.22), p(0.78, 0.78)], line);
+            painter.line_segment([p(0.78, 0.22), p(0.22, 0.78)], line);
+        }
     }
 }
 
@@ -158,9 +164,8 @@ pub fn button(
     response
 }
 
-/// A framed button with `icon` before `text`. `accent` gives it the selection colour (the
-/// main action).
-pub fn labelled(ui: &mut egui::Ui, icon: Icon, text: &str, accent: bool) -> egui::Response {
+/// A framed button with `icon` before `text`, filled with `fill` (white text) if given.
+pub fn labelled(ui: &mut egui::Ui, icon: Icon, text: &str, fill: Option<Color32>) -> egui::Response {
     let icon_size = 16.0;
     let galley = ui.painter().layout_no_wrap(text.to_string(), egui::FontId::proportional(13.0), Color32::PLACEHOLDER);
     let w = (12.0 + icon_size + 6.0 + galley.size().x + 12.0).max(style::DIALOG_W);
@@ -168,11 +173,9 @@ pub fn labelled(ui: &mut egui::Ui, icon: Icon, text: &str, accent: bool) -> egui
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, text));
     if ui.is_rect_visible(rect) {
         let v = ui.style().interact(&response);
-        let (fill, colour) = if accent {
-            let fill = ui.visuals().selection.bg_fill;
-            (if response.hovered() { fill.gamma_multiply(1.25) } else { fill }, Color32::WHITE)
-        } else {
-            (v.weak_bg_fill, v.text_color())
+        let (fill, colour) = match fill {
+            Some(fill) => (if response.hovered() { fill.gamma_multiply(1.25) } else { fill }, Color32::WHITE),
+            None => (v.weak_bg_fill, v.text_color()),
         };
         ui.painter().rect(rect, 6.0, fill, v.bg_stroke, StrokeKind::Inside);
         let content_w = icon_size + 6.0 + galley.size().x;
@@ -184,4 +187,17 @@ pub fn labelled(ui: &mut egui::Ui, icon: Icon, text: &str, accent: bool) -> egui
         ui.painter().galley(at, galley, colour);
     }
     response
+}
+
+/// A small red X that removes something. `name` is what screen readers and the UI tests call
+/// it.
+pub fn remove_button(ui: &mut egui::Ui, name: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+    let colour = if response.hovered() { style::RED_HOVER } else { style::RED };
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    paint(ui.painter(), rect.shrink(3.0), Icon::Cross, colour);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
