@@ -235,7 +235,7 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
   - select adjacent zones and merge them;
   - delete zones.
 - [x] Gaming zone panel:
-  - on/off;
+  - make a zone the gaming zone / turn it back;
   - size mode (Pixels / Aspect + scale / Integer scale of a base), with presets (1280×720, 1600×900, 1920×1080, 2560×1440, 3840×2160, 4:3, 16:10, 21:9) and an exact W×H readout;
   - X/Y inputs; drag the body or its edges to move it (edges move, never resize); align buttons (centre, left, right, top, bottom);
   - "Capture size from window": pick from a list of open top-level windows and read their client size;
@@ -250,7 +250,7 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
 - Moving the gaming zone in the editor visibly reflows the neighbours.
 - The core's memory is unchanged after the editor closes.
 
-**Built (2026-10-14), awaiting Tom's manual test.** Details:
+**Done: built 2026-10-14; Tom happy with it after testing on 2026-10-17 (real-world use still to come).** Details:
 - Editing logic is in gz-core `edit.rs` (unit-tested; one test rebuilds Split focus click by click and gets the
   built-in rects). A split adds a guide *between* the zone's sides at the shortest decimal that lands on the clicked
   pixel; dragging a divider keeps its anchor kind (px / % / split / offset); "Make it fixed px / % of the area"
@@ -271,12 +271,29 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
 - Number boxes apply on Enter, not per keystroke (typing "79" applied "7" first, clamped, then went wrong).
 - Select a zone to type its width/height (px or %); "Lock size" keeps a zone's size through every other edit.
 - Moving a divider by hand leaves every other divider where it is (proportional splits used to follow it).
-- "Make zone N the gaming zone" replaces that zone: the zones beside it meet its edges, strips fill above and below.
-  (Adding a gaming zone floating over the zones is gone.) "Turn it back into a normal zone" leaves a zone in its place.
-- Editor icon: the tray icon's shape with a blue gaming zone.
+- (Superseded below: the first "Make zone N the gaming zone" and the blue editor icon.)
 - A monitor on the default layout counts as using it (deleting that layout is refused).
 - Testing (agreed 2026-10-14): editor UI tests with egui_kittest (test-only dependency) click and type in the real UI;
   Tom's checklists only cover what needs a person.
+
+**Changes after Tom's later tests (2026-10-15 to 10-17), the gaming zone model as it now stands:**
+- The editor icon is the same green icon as the tray app (Tom's choice).
+- Lock size pushes: a locked zone keeps its size, and a divider next to it pushes it into the next unlocked zone.
+  Locks last only while the editor is open.
+- "Make zone N the gaming zone": the gaming zone takes that zone's exact size and place. The zone's side dividers
+  now follow it (`Offset` from `gz0.<side>`, 0 px), and four leftover zones take the zone's place (above, left, right,
+  below), empty until the gaming zone is made smaller. "Fill its space" and "Turn it back into a normal zone"
+  (merges its space back into one zone) undo that.
+- The gaming zone keeps its **size, not its place** (Tom): a border touching it moves it, either way, and the zone
+  on the far side gives or takes the space. With a leftover zone between, the border resizes that first, then pushes.
+  Dragging the gaming zone pushes its neighbours. Only dividers fixed to it, or splits inside its leftover space,
+  move with it; a split between it and something fixed stays put.
+- Zone numbers skip empty zones.
+- Robustness: merge never swallows empty leftover zones and refuses to mix zones that move with the gaming zone with
+  ones that don't. An edit that would leave zones meeting only by chance (on two dividers that don't move together) is
+  refused. Such dividers in older layouts are joined the next time that layout is edited. A randomised test makes
+  thousands of edits and checks the zones always tile the screen and the gaming zone keeps its size.
+- Next (Tom, 2026-10-17): real-world use, then any bugs found, then the editor UI made the way he wants it.
 
 ### Phase 4 — Layout selector, shortcuts, settings
 - [ ] Layout selector popup:

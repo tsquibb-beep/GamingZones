@@ -4,14 +4,16 @@ A lightweight window manager for Windows, in the style of PowerToys FancyZones, 
 **gaming zone**: a zone sized to an exact game resolution that the other zones arrange around.
 A hotkey to remove and restore a game window's border is planned.
 
-**Status: early development.** Phase 0 (skeleton and test tools) is done. Zones and snapping come next.
-See [PLAN.md](PLAN.md) for the scope and phase order.
+**Status: early development.** Zones with Shift-drag snapping, the gaming zone and the layout editor work
+(phases 0 to 3). The layout selector, quick-switch hotkeys and settings window come next. See [PLAN.md](PLAN.md)
+for the scope and phase order.
 
 ## What's here now
 
-- `gamingzones.exe`: tray app. It runs a single instance, keeps its settings in `%APPDATA%\GamingZones\`,
-  and has a debug hotkey (`Win+Ctrl+Alt+I`) that logs the geometry of the foreground window to
-  `%APPDATA%\GamingZones\gamingzones.log`.
+- `gamingzones.exe`: tray app. Hold Shift while dragging a window to see the zones and drop it into one.
+  A hotkey snaps the foreground window to the gaming zone. Settings and layouts live in `%APPDATA%\GamingZones\`.
+- `gz-editor.exe`: layout editor, opened from the tray menu. Split, merge and resize zones, type exact sizes,
+  lock zones, and turn a zone into a gaming zone of an exact resolution.
 - `ruler.exe`: test window that shows its own client size, window rect, DWM frame bounds and DPI in physical
   pixels. It can set an exact client size and toggle a fixed (non-resizable) frame.
 

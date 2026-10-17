@@ -4,7 +4,7 @@ members = ["crates/gz-core", "crates/gz-win", "crates/gamingzones", "crates/rule
 
 [workspace.package]
 # Keep in sync with version.txt (the source of truth).
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Tom Squibb"]
 license = "GPL-3.0-only"
