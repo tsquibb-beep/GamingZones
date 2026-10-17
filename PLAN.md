@@ -295,6 +295,21 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
   thousands of edits and checks the zones always tile the screen and the gaming zone keeps its size.
 - Next (Tom, 2026-10-17): real-world use, then any bugs found, then the editor UI made the way he wants it.
 
+**Editor UI rework (Tom's list, 2026-10-17, v0.2.1):**
+- Font: Lexend (the same as Spotify Masher), embedded; SIL OFL 1.1 (`res/fonts/OFL.txt`).
+- Window 1760×760 (wider and shorter: a bigger canvas on a widescreen).
+- Icons drawn with the painter (no icon font or crate): monitor tiles (number on the icon, name and resolution under
+  it), undo/redo arrows, Preview (eye), New (+), Save (floppy), Discard (bin), padlocks.
+- Saving: Save and Discard sit under the canvas while the open layout has unsaved changes. Opening another layout or
+  monitor with unsaved changes asks Save / Discard / Cancel. Undo/redo cover the open layout only.
+- Layout list: right-click for Rename, Duplicate, Use on ▸ monitor, Delete. These save straight away (Tom's choice),
+  so a delete can't be undone. Double-click a name to rename. Thumbnails label the gaming zone (resolution, ratio).
+- Canvas: zones meet the gaming zone (no inset gap). Each zone has a padlock (shown on hover, always when locked);
+  clicking it toggles the lock.
+- Properties pane: the layout name and zone count (no rename, no id, no deadzone sentence); "Used on" one monitor per
+  line; gaming zone options only while the gaming zone is selected; left-aligned labels; fixed widths for boxes and
+  buttons; "How to edit" collapsed.
+
 ### Phase 4 — Layout selector, shortcuts, settings
 - [ ] Layout selector popup:
   - hotkey (default ``Win+Shift+` ``, FancyZones' editor key); preview cards; number keys to choose;

@@ -1,7 +1,8 @@
 //! UI tests: drive the real editor UI headlessly (egui_kittest), clicking and typing the way
 //! a person would, on a made-up 6144×2560 monitor like Tom's. Nothing is saved or shown.
 
-use eframe::egui::{Key, Modifiers, Vec2};
+use eframe::egui::accesskit::Role;
+use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, Vec2};
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use gz_core::edit;
@@ -10,8 +11,10 @@ use gz_core::store::LayoutsFile;
 use gz_core::Rect;
 use gz_win::monitor::MonitorInfo;
 
-use crate::app::{Editor, Selection};
+use crate::app::{Dialog, Editor, Selection};
+use crate::canvas;
 use crate::monitors::Monitor;
+use crate::style;
 
 const WORK: Rect = Rect::new(0, 0, 6144, 2500);
 const MONITOR: Rect = Rect::new(0, 0, 6144, 2560);
@@ -33,8 +36,74 @@ fn three_columns() -> Layout {
 }
 
 fn harness(layout: Layout) -> Harness<'static, Editor> {
-    let editor = Editor::for_test(vec![dell()], LayoutsFile { layouts: vec![layout] }, 300);
-    Harness::builder().with_size(Vec2::new(1600.0, 1000.0)).build_ui_state(|ui, ed: &mut Editor| ed.show(ui), editor)
+    harness_with(vec![layout])
+}
+
+fn harness_with(layouts: Vec<Layout>) -> Harness<'static, Editor> {
+    let editor = Editor::for_test(vec![dell()], LayoutsFile { layouts }, 300);
+    // The fonts apply from the frame after they're set, so the first frame only sets them.
+    let mut fonts_set = false;
+    let mut h = Harness::builder().with_size(Vec2::new(1760.0, 760.0)).with_step_dt(0.05).build_ui_state(
+        move |ui, ed: &mut Editor| {
+            if !std::mem::replace(&mut fonts_set, true) {
+                style::install(ui.ctx());
+                return;
+            }
+            ed.show(ui)
+        },
+        editor,
+    );
+    h.run_steps(2);
+    h
+}
+
+/// Three columns, and another layout ("Other", the same zones).
+fn two_layouts() -> Vec<Layout> {
+    let mut other = three_columns();
+    other.id = "other".into();
+    other.name = "Other".into();
+    vec![three_columns(), other]
+}
+
+/// What the editor has written to its (test) layouts.json.
+fn written(h: &Harness<'_, Editor>) -> LayoutsFile {
+    let text = std::fs::read_to_string(h.state().files.layouts_path()).expect("layouts.json was written");
+    LayoutsFile::from_json(&text).unwrap()
+}
+
+/// Presses and releases the left button at `p` (screen points).
+fn click_at(h: &mut Harness<'_, Editor>, p: Pos2) {
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.run_steps(1);
+}
+
+/// Types `text` one key per frame.
+fn type_text(h: &mut Harness<'_, Editor>, text: &str) {
+    for c in text.chars() {
+        h.event(Event::Text(c.to_string()));
+        h.run_steps(1);
+    }
+}
+
+/// Where zone `i` of the open layout is on the canvas (points).
+fn zone_on_canvas(h: &Harness<'_, Editor>, i: usize) -> egui::Rect {
+    let r = h.state().current().resolve(WORK, MONITOR, 0).unwrap()[i].rect;
+    canvas::map_rect(r, MONITOR, h.state().canvas_monitor)
+}
+
+/// The layout card named `name`.
+fn card<'h>(h: &'h Harness<'_, Editor>, name: &'h str) -> egui_kittest::Node<'h> {
+    h.get_by_role_and_label(Role::Button, name)
+}
+
+/// Opens the right-click menu of the layout card named `name`.
+fn card_menu(h: &mut Harness<'_, Editor>, name: &str) {
+    card(h, name).click_secondary();
+    h.run_steps(2);
 }
 
 fn widths(h: &Harness<'_, Editor>) -> Vec<i32> {
@@ -103,7 +172,7 @@ fn thirds_with_a_locked_zone() {
     select(&mut h, Selection::Zones(vec![0]));
     type_into(&mut h, "% of the width", "33", true);
     assert_eq!(widths(&h), [2028, 1972, 2144]);
-    h.get_by_label("🔒 Lock size").click();
+    h.get_by_label("Lock").click();
     h.run_steps(2);
     assert!(h.state().is_locked(0));
     select(&mut h, Selection::Zones(vec![2]));
@@ -116,7 +185,7 @@ fn locked_zones_are_pushed() {
     // Tom: lock a zone, resize its neighbour, and the locked zone is pushed into the next one.
     let mut h = harness(three_columns());
     select(&mut h, Selection::Zones(vec![1]));
-    h.get_by_label("🔒 Lock size").click();
+    h.get_by_label("Lock").click();
     h.run_steps(2);
     assert!(h.state().is_locked(1));
     // Its own size boxes are off while it's locked.
@@ -220,33 +289,170 @@ fn undo_and_redo() {
 
 #[test]
 fn deleting_layouts() {
-    let mut other = three_columns();
-    other.id = "other".into();
-    other.name = "Other".into();
-    let editor = Editor::for_test(vec![dell()], LayoutsFile { layouts: vec![three_columns(), other] }, 300);
-    let mut h = Harness::builder()
-        .with_size(Vec2::new(1600.0, 1000.0))
-        .build_ui_state(|ui, ed: &mut Editor| ed.show(ui), editor);
-    h.run_steps(2);
+    let mut h = harness_with(two_layouts());
     // "Columns" is the default layout, so the monitor (which has no entry of its own) uses it.
-    h.get_by_label("✔ In use on this monitor");
+    h.get_by_label("Used on:");
+    assert!(h.query_by_label("Use on this monitor").is_none());
     // Deleting it is refused...
-    h.get_by_label("Delete").click();
+    card_menu(&mut h, "Columns");
+    h.get_by_label("Delete…").click();
     h.run_steps(2);
-    h.get_all_by_label("Delete").last().unwrap().click();
+    h.get_by_label("Delete").click();
     h.run_steps(2);
     assert_eq!(h.state().doc.layouts.layouts.len(), 2);
     let (text, error) = h.state().status().cloned().unwrap();
     assert!(error && text.contains("in use on 1 · DELL"), "{text}");
-    // ...but an unused one goes, and Ctrl+Z brings it back.
-    h.state_mut().layout = 1;
+    // ...but an unused one goes, and straight into the file.
+    card_menu(&mut h, "Other");
+    h.get_by_label("Delete…").click();
     h.run_steps(2);
     h.get_by_label("Delete").click();
     h.run_steps(2);
-    h.get_all_by_label("Delete").last().unwrap().click();
-    h.run_steps(2);
     assert_eq!(h.state().doc.layouts.layouts.len(), 1);
+    assert_eq!(written(&h).layouts.len(), 1);
+    assert_eq!(h.state().current().name, "Columns");
+}
+
+#[test]
+fn switching_layouts_with_unsaved_changes_asks_first() {
+    let mut h = harness_with(two_layouts());
+    h.state_mut().move_divider("g1", 1000);
+    h.run_steps(2);
+    assert!(h.state().dirty());
+    // Cancel: stay, changes kept.
+    card(&h, "Other").click();
+    h.run_steps(2);
+    assert!(matches!(h.state().dialog, Some(Dialog::UnsavedOnSwitch(_))));
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert_eq!((h.state().layout, widths(&h)[0]), (0, 1000));
+    // Discard: on to the other layout; the change is gone.
+    card(&h, "Other").click();
+    h.run_steps(2);
+    // The dialog's button, not the one under the canvas.
+    h.get_all_by_label("Discard").last().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(h.state().layout, 1);
+    assert_eq!(h.state().doc.layouts.layouts[0], three_columns());
+    assert!(!h.state().dirty());
+    // Save: written, then on.
+    h.state_mut().move_divider("g2", 5000);
+    h.run_steps(2);
+    card(&h, "Columns").click();
+    h.run_steps(2);
+    h.get_all_by_label("Save").last().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(h.state().layout, 0);
+    let saved = &written(&h).layouts[1];
+    assert_eq!(saved.guide_positions(WORK, MONITOR).unwrap()["g2"].1, 5000);
+    assert!(!h.state().dirty());
+}
+
+#[test]
+fn save_and_discard_under_the_canvas() {
+    let mut h = harness(three_columns());
+    assert!(h.query_by_label("Save").is_none(), "nothing to save yet");
+    h.state_mut().move_divider("g1", 1000);
+    h.run_steps(2);
+    h.get_by_label("Discard").click();
+    h.run_steps(2);
+    assert_eq!(widths(&h)[0], 2000);
+    assert!(!h.state().dirty());
+    assert!(h.query_by_label("Discard").is_none());
+    // Nothing to undo after a discard.
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run_steps(2);
-    assert_eq!(h.state().doc.layouts.layouts.len(), 2);
+    assert_eq!(widths(&h)[0], 2000);
+
+    h.state_mut().move_divider("g1", 1500);
+    h.run_steps(2);
+    h.get_by_label("Save").click();
+    h.run_steps(2);
+    assert!(!h.state().dirty());
+    assert_eq!(written(&h).layouts[0].guide_positions(WORK, MONITOR).unwrap()["g1"].1, 1500);
+}
+
+#[test]
+fn renaming_a_layout() {
+    let mut h = harness_with(two_layouts());
+    // Double-click its name.
+    let r = card(&h, "Other").rect();
+    let name = egui::pos2(r.left() + 30.0, r.bottom() - 12.0);
+    h.hover_at(name);
+    h.run_steps(1);
+    for pressed in [true, false, true, false] {
+        h.event(Event::PointerButton {
+            pos: name,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    h.run_steps(2);
+    assert!(h.state().renaming.is_some());
+    type_text(&mut h, "Wide");
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    assert_eq!(h.state().doc.layouts.layouts[1].name, "Wide");
+    assert_eq!(written(&h).layouts[1].name, "Wide");
+    assert_eq!(written(&h).layouts[1].id, "other", "the id doesn't change");
+    // From the menu; Esc changes nothing.
+    card_menu(&mut h, "Wide");
+    h.get_by_label("Rename").click();
+    h.run_steps(2);
+    type_text(&mut h, "Nope");
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().doc.layouts.layouts[1].name, "Wide");
+    assert!(h.state().renaming.is_none());
+}
+
+#[test]
+fn duplicating_and_using_a_layout_on_a_monitor() {
+    let mut h = harness_with(two_layouts());
+    card_menu(&mut h, "Other");
+    h.get_by_label("Duplicate").click();
+    h.run_steps(2);
+    assert_eq!(h.state().current().name, "Other copy");
+    assert_eq!(written(&h).layouts.len(), 3);
+    card_menu(&mut h, "Other");
+    let menu = h
+        .get_all_by_label_contains("Use on")
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Use on this monitor"));
+    menu.expect("the Use on menu").hover();
+    h.run_steps(2);
+    // The submenu's entry (the monitor's button in the top bar is the first).
+    h.get_all_by_label_contains("1 · DELL").last().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(h.state().doc.applied.layout_for("TEST-DELL"), Some("other"));
+    let applied = std::fs::read_to_string(h.state().files.applied_path()).unwrap();
+    assert!(applied.contains("\"other\""), "{applied}");
+}
+
+#[test]
+fn a_zones_padlock_locks_it() {
+    let mut h = harness(three_columns());
+    let zone = zone_on_canvas(&h, 1);
+    let lock = canvas::lock_rect(zone).expect("room for a padlock");
+    click_at(&mut h, lock.center());
+    assert!(h.state().is_locked(1));
+    assert_eq!(widths(&h), [2000, 2000, 2144], "clicking the padlock doesn't split the zone");
+    click_at(&mut h, lock.center());
+    assert!(!h.state().is_locked(1));
+    // Elsewhere in the zone, a click splits it.
+    click_at(&mut h, zone.center());
+    assert_eq!(widths(&h).len(), 4);
+}
+
+#[test]
+fn gaming_zone_options_only_while_it_is_selected() {
+    let mut l = three_columns();
+    edit::make_gaming_zone(&mut l, 1, WORK, MONITOR).unwrap();
+    let mut h = harness(l);
+    assert!(h.query_by_label("Turn it back into a normal zone").is_none());
+    select(&mut h, Selection::Zones(vec![0]));
+    assert!(h.query_by_label("Turn it back into a normal zone").is_none());
+    assert!(h.query_by_label_contains("the gaming zone").is_none(), "there's one already");
+    select(&mut h, Selection::Gaming);
+    h.get_by_label("Turn it back into a normal zone");
 }

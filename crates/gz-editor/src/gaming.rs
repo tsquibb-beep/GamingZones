@@ -7,6 +7,7 @@ use gz_core::gaming::{gcd, largest_aspect_step, Align, GamingSize, GamingZone, P
 
 use crate::app::{Dialog, Editor, Selection};
 use crate::capture;
+use crate::style;
 
 const PIXEL_PRESETS: [(u32, u32); 5] = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160)];
 const ASPECT_PRESETS: [(u32, u32); 4] = [(4, 3), (16, 9), (16, 10), (21, 9)];
@@ -42,7 +43,8 @@ fn convert(size: GamingSize, to: Mode) -> GamingSize {
 
 /// A size box: typed values apply on Enter, not on every keystroke.
 fn number(ui: &mut egui::Ui, value: &mut u32, max: u32) -> bool {
-    ui.add(egui::DragValue::new(value).range(1..=max).update_while_editing(false)).changed()
+    let drag = egui::DragValue::new(value).range(1..=max).update_while_editing(false);
+    ui.add_sized([style::PAIR_W, style::ROW_H], drag).changed()
 }
 
 impl Editor {
@@ -70,29 +72,14 @@ impl Editor {
         self.edit_layout("gaming", |l, w, m| edit::set_gaming_zone(l, new, w, m));
     }
 
+    /// The gaming zone's properties (shown while it's selected).
     pub fn gaming_panel(&mut self, ui: &mut egui::Ui) {
         let (work, monitor) = self.areas();
-        ui.heading("Gaming zone");
         let Some(gz) = self.current().gaming_zones.first().cloned() else {
-            ui.weak("A zone of an exact size (a game's resolution). Make a zone the gaming zone, then give it a size: the rest of that zone's space becomes normal zones.");
-            let single = match &self.selection {
-                Selection::Zones(v) if v.len() == 1 => Some(v[0]),
-                _ => None,
-            };
-            let text = single.map_or("Make a zone the gaming zone".to_string(), |i| {
-                format!("Make zone {} the gaming zone", self.zone_name(i))
-            });
-            if ui.add_enabled(single.is_some(), egui::Button::new(text)).clicked() {
-                let i = single.expect("button enabled");
-                if self.edit_layout("", |l, w, m| edit::make_gaming_zone(l, i, w, m)).is_some() {
-                    self.selection = Selection::Gaming;
-                }
-            }
-            if single.is_none() {
-                ui.weak("Select one zone on the canvas first.");
-            }
+            self.selection = Selection::None;
             return;
         };
+        ui.heading("Gaming zone");
         let over_taskbar = self.current().gaming_over_taskbar;
         let bounds = self.current().gaming_bounds(work, monitor);
         let space = edit::gaming_space(self.current(), work, monitor).ok().flatten();
@@ -121,7 +108,8 @@ impl Editor {
                 ui.label(":");
                 number(ui, ratio_h, 1000);
                 ui.label("step");
-                number(ui, k, max);
+                let drag = egui::DragValue::new(k).range(1..=max).update_while_editing(false);
+                ui.add_sized([style::PAIR_W, style::ROW_H], drag);
                 if ui.small_button("−").clicked() && *k > 1 {
                     *k -= 1;
                 }
@@ -152,33 +140,34 @@ impl Editor {
             }
         }
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("gz-presets").selected_text("Presets").show_ui(ui, |ui| {
-                for (w, h) in PIXEL_PRESETS {
-                    if ui.selectable_label(false, format!("{w} × {h}")).clicked() {
-                        new.size = GamingSize::Pixels { w, h };
-                    }
-                }
-                ui.separator();
-                for (rw, rh) in ASPECT_PRESETS {
-                    if ui.selectable_label(false, format!("{rw}:{rh}")).clicked() {
-                        // Keep about the current height, within what fits.
-                        let g = gcd(rw, rh).max(1);
-                        let current_h = placed.map_or(1080, |p| p.height()) as u32;
-                        let mut k = (current_h as f64 / (rh / g) as f64).round().max(1.0) as u32;
-                        let fits = largest_aspect_step(rw, rh, bounds.width(), bounds.height());
-                        if fits > 0 {
-                            k = k.min(fits);
+            egui::ComboBox::from_id_salt("gz-presets").selected_text("Presets").width(style::BUTTON_W).show_ui(
+                ui,
+                |ui| {
+                    for (w, h) in PIXEL_PRESETS {
+                        if ui.selectable_label(false, format!("{w} × {h}")).clicked() {
+                            new.size = GamingSize::Pixels { w, h };
                         }
-                        new.size = GamingSize::Aspect { ratio_w: rw, ratio_h: rh, k };
                     }
-                }
-            });
+                    ui.separator();
+                    for (rw, rh) in ASPECT_PRESETS {
+                        if ui.selectable_label(false, format!("{rw}:{rh}")).clicked() {
+                            // Keep about the current height, within what fits.
+                            let g = gcd(rw, rh).max(1);
+                            let current_h = placed.map_or(1080, |p| p.height()) as u32;
+                            let mut k = (current_h as f64 / (rh / g) as f64).round().max(1.0) as u32;
+                            let fits = largest_aspect_step(rw, rh, bounds.width(), bounds.height());
+                            if fits > 0 {
+                                k = k.min(fits);
+                            }
+                            new.size = GamingSize::Aspect { ratio_w: rw, ratio_h: rh, k };
+                        }
+                    }
+                },
+            );
         });
-        ui.horizontal(|ui| {
-            if ui.button("Capture size from window…").clicked() {
-                self.dialog = Some(Dialog::Capture(capture::windows()));
-            }
-        });
+        if style::wide_button(ui, "Capture size from window…").clicked() {
+            self.dialog = Some(Dialog::Capture(capture::windows()));
+        }
         if new != gz {
             self.apply_gaming(new);
         }
@@ -189,8 +178,7 @@ impl Editor {
                 space.height()
             ));
             if placed.is_some_and(|p| p != space)
-                && ui
-                    .button("Fill its space")
+                && style::wide_button(ui, "Fill its space")
                     .on_hover_text(format!("Make it {} × {}", space.width(), space.height()))
                     .clicked()
             {
@@ -208,14 +196,13 @@ impl Editor {
                     (gz.y, p.top - work.top, (work.height() - p.height()).div_euclid(2))
                 };
                 ui.horizontal(|ui| {
-                    ui.label(label);
+                    style::label_cell(ui, label);
                     let mut value = current;
                     let centred = matches!(pos, Position::Align(Align::Centre));
+                    let drag = egui::DragValue::new(&mut value).suffix(" px").update_while_editing(false);
                     let changed = ui
-                        .add_enabled(
-                            !centred,
-                            egui::DragValue::new(&mut value).suffix(" px").update_while_editing(false),
-                        )
+                        .add_enabled_ui(!centred, |ui| ui.add_sized([style::NUMBER_W, style::ROW_H], drag))
+                        .inner
                         .changed();
                     let mut centre_it = centred;
                     let toggled = ui.checkbox(&mut centre_it, "centred").changed();
@@ -254,8 +241,8 @@ impl Editor {
                 Ok(())
             });
         }
-        if ui
-            .button("Arrange zones around it")
+        ui.add_space(4.0);
+        if style::wide_button(ui, "Arrange zones around it")
             .on_hover_text("Replaces this layout's zones with a column either side and a strip above and below.")
             .clicked()
         {
@@ -267,7 +254,7 @@ impl Editor {
         } else {
             "The zones around it stay where they are."
         };
-        if ui.button("Turn it back into a normal zone").on_hover_text(back).clicked() {
+        if style::wide_button(ui, "Turn it back into a normal zone").on_hover_text(back).clicked() {
             self.edit_layout("", edit::remove_gaming_zone);
             self.selection = Selection::None;
         }

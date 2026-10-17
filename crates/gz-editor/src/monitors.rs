@@ -26,6 +26,13 @@ impl Monitor {
         let name = if self.name.is_empty() { &self.info.device } else { &self.name };
         format!("{} · {name} · {} × {}", n + 1, r.width(), r.height())
     }
+
+    /// "DELL U5226KW · 6144 × 2560" (under a monitor icon that shows the number).
+    pub fn short_label(&self) -> String {
+        let r = self.info.rect;
+        let name = if self.name.is_empty() { &self.info.device } else { &self.name };
+        format!("{name} · {} × {}", r.width(), r.height())
+    }
 }
 
 /// Every monitor, left to right (then top to bottom).

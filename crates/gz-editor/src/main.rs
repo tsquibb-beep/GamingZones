@@ -12,7 +12,10 @@ mod capture;
 mod core_link;
 mod doc;
 mod gaming;
+mod icons;
+mod list;
 mod monitors;
+mod style;
 #[cfg(test)]
 mod ui_tests;
 
@@ -50,12 +53,19 @@ fn main() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([960.0, 600.0])
+            .with_inner_size([1760.0, 760.0])
+            .with_min_inner_size([1200.0, 560.0])
             .with_icon(egui::IconData { rgba: ICON.to_vec(), width: 64, height: 64 }),
         ..Default::default()
     };
-    if let Err(e) = eframe::run_native(TITLE, options, Box::new(|_cc| Ok(Box::new(editor)))) {
+    if let Err(e) = eframe::run_native(
+        TITLE,
+        options,
+        Box::new(|cc| {
+            style::install(&cc.egui_ctx);
+            Ok(Box::new(editor))
+        }),
+    ) {
         window::message_box(None, &format!("The editor could not start: {e}"), TITLE, MessageBoxKind::Error);
     }
 }

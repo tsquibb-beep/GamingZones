@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText, Sense, Vec2};
+use eframe::egui::{self, Id, Key, Modifiers, RichText, Sense, Vec2};
 use gz_core::config::{Settings, SETTINGS_FILE};
 use gz_core::edit::{self, EditError, GuideKind};
 use gz_core::ipc::Preview;
@@ -12,11 +12,13 @@ use gz_core::store::{Applied, LayoutsFile, MonitorEntry};
 use gz_core::Rect;
 use gz_win::Hwnd;
 
-use crate::canvas::{self, CanvasDrag};
+use crate::canvas::CanvasDrag;
 use crate::capture::{self, WindowEntry};
 use crate::core_link;
 use crate::doc::{Doc, Files, Stamps};
+use crate::icons::{self, Icon};
 use crate::monitors::{self, Monitor};
+use crate::style;
 
 /// Smallest zone (px) a split or divider drag may leave.
 pub const MIN_ZONE_PX: i32 = edit::MIN_ZONE_PX;
@@ -32,19 +34,37 @@ pub enum Selection {
 pub enum Dialog {
     DeleteLayout(usize),
     UnsavedOnClose,
-    ChangedOnDisk,
+    /// The open layout has unsaved changes and Tom asked to show another one.
+    UnsavedOnSwitch(Goto),
+    /// The files changed on disk. `edits`: the open layout's unsaved changes are part of
+    /// this save (Save), not only a layout-list change.
+    ChangedOnDisk {
+        edits: bool,
+    },
     Capture(Vec<WindowEntry>),
 }
 
+/// Which monitor and layout to show.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Goto {
+    pub monitor: usize,
+    pub layout: usize,
+}
+
 pub struct Editor {
-    files: Files,
+    pub(crate) files: Files,
     /// The files couldn't be read: the editor only shows this.
     load_error: Option<String>,
     pub doc: Doc,
+    /// What's in the files. It only differs from `doc` in the open layout: layout-list
+    /// changes (new, rename, delete…) go to both and are written at once.
     saved: Doc,
     stamps: Stamps,
-    undo: Vec<Doc>,
-    redo: Vec<Doc>,
+    /// `saved` couldn't be written (an error, or Cancel on "Files changed").
+    unwritten: bool,
+    /// Earlier versions of the open layout. Cleared when another layout is opened.
+    undo: Vec<Layout>,
+    redo: Vec<Layout>,
     /// Key and time of the last change: changes with the same key within a second (one
     /// drag, typing in one box) are one undo step.
     last_change: Option<(String, f64)>,
@@ -56,15 +76,23 @@ pub struct Editor {
     pub canvas_drag: Option<CanvasDrag>,
     /// `snapping.deadzone_px` from settings.json: smaller zones are shown greyed.
     pub deadzone: i32,
-    preview_on: bool,
+    pub(crate) preview_on: bool,
     last_preview: Option<String>,
     own_window: Option<Hwnd>,
-    status: Option<(String, bool)>,
+    pub(crate) status: Option<(String, bool)>,
     pub dialog: Option<Dialog>,
     allow_close: bool,
     close_after_save: bool,
     /// Zones whose size edits mustn't change: (layout id, the zone). Only while the editor is open.
     locked: Vec<(String, Zone)>,
+    /// The layout whose name is being edited in its card, and the text so far.
+    pub(crate) renaming: Option<(usize, String)>,
+    /// Renaming just started: focus the name box.
+    pub(crate) rename_focus: bool,
+    /// Where the canvas drew the monitor last frame (for the UI tests).
+    pub(crate) canvas_monitor: egui::Rect,
+    /// Tell the tray app to reload after writing (off in the UI tests).
+    notify_tray: bool,
 }
 
 impl Editor {
@@ -102,6 +130,7 @@ impl Editor {
             saved: doc.clone(),
             doc,
             stamps,
+            unwritten: false,
             undo: Vec::new(),
             redo: Vec::new(),
             last_change: None,
@@ -120,17 +149,31 @@ impl Editor {
             allow_close: false,
             close_after_save: false,
             locked: Vec::new(),
+            renaming: None,
+            rename_focus: false,
+            canvas_monitor: egui::Rect::NOTHING,
+            notify_tray: true,
         };
-        editor.select_applied_layout();
+        if let Some(i) = editor.applied_layout(monitor) {
+            editor.layout = i;
+        }
         editor
     }
 
-    /// An editor on made-up monitors and layouts, for the UI tests (never saves).
+    /// An editor on made-up monitors and layouts, for the UI tests. It writes to its own
+    /// new temp folder, never to the real files, and doesn't tell the tray app.
     #[cfg(test)]
     pub fn for_test(monitors: Vec<Monitor>, layouts: LayoutsFile, deadzone: i32) -> Editor {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
         let applied = Applied { default_layout: layouts.layouts.first().map(|l| l.id.clone()), ..Default::default() };
-        let files = Files { dir: std::env::temp_dir().join("gz-editor-test-never-written") };
-        Editor::new(files, monitors, Doc { layouts, applied }, Stamps::default(), None, deadzone)
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("gz-editor-test-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let files = Files { dir };
+        let mut editor = Editor::new(files, monitors, Doc { layouts, applied }, Stamps::default(), None, deadzone);
+        editor.notify_tray = false;
+        editor
     }
 
     pub fn current(&self) -> &Layout {
@@ -146,19 +189,47 @@ impl Editor {
         (self.mon().work(), self.mon().rect())
     }
 
-    fn dirty(&self) -> bool {
-        self.doc != self.saved
+    /// The open layout has changes that aren't in the files.
+    pub fn dirty(&self) -> bool {
+        self.unwritten || self.doc != self.saved
     }
 
-    /// Shows the layout the selected monitor uses.
-    fn select_applied_layout(&mut self) {
-        let Some(m) = self.monitors.get(self.monitor) else { return };
-        if let Some(i) =
-            self.doc.applied.layout_for(&m.id).and_then(|id| self.doc.layouts.layouts.iter().position(|l| l.id == id))
-        {
-            self.layout = i;
+    /// The layout monitor `n` uses.
+    fn applied_layout(&self, n: usize) -> Option<usize> {
+        let m = self.monitors.get(n)?;
+        let id = self.doc.applied.layout_for(&m.id)?;
+        self.doc.layouts.layouts.iter().position(|l| l.id == id)
+    }
+
+    /// Shows another monitor or layout, asking first if the open layout has unsaved changes.
+    pub fn request(&mut self, to: Goto) {
+        if to.layout != self.layout && self.dirty() {
+            self.dialog = Some(Dialog::UnsavedOnSwitch(to));
+        } else {
+            self.go(to);
+        }
+    }
+
+    /// Shows monitor `n`, with the layout it uses.
+    pub fn request_monitor(&mut self, n: usize) {
+        let layout = self.applied_layout(n).unwrap_or(self.layout);
+        self.request(Goto { monitor: n, layout });
+    }
+
+    pub fn go(&mut self, to: Goto) {
+        self.monitor = to.monitor.min(self.monitors.len().saturating_sub(1));
+        if to.layout != self.layout {
+            self.layout = to.layout.min(self.doc.layouts.layouts.len() - 1);
+            self.forget_history();
         }
         self.selection = Selection::None;
+        self.canvas_drag = None;
+    }
+
+    fn forget_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.last_change = None;
     }
 
     pub fn set_error(&mut self, text: impl Into<String>) {
@@ -173,9 +244,7 @@ impl Editor {
 
     /// Zone `i`'s number as the canvas shows it (empty zones have none).
     pub fn zone_name(&self, i: usize) -> String {
-        let (work, monitor) = self.areas();
-        let zones = self.current().resolve(work, monitor, 0).unwrap_or_default();
-        zone_number(&zones, i).map_or_else(|| format!("{}", i + 1), |n| n.to_string())
+        zone_name_in(self.current(), i, self.areas())
     }
 
     /// An edit error as the editor shows it (zone numbers as on the canvas).
@@ -210,10 +279,9 @@ impl Editor {
         }
     }
 
-    /// The selected layout's locked zones in `doc`, with their size on this monitor.
-    fn locked_sizes(&self, doc: &Doc) -> Vec<(Zone, (i32, i32))> {
+    /// `layout`'s locked zones, with their size on this monitor.
+    fn locked_sizes(&self, layout: &Layout) -> Vec<(Zone, (i32, i32))> {
         let (work, monitor) = self.areas();
-        let Some(layout) = doc.layouts.layouts.get(self.layout) else { return Vec::new() };
         let Ok(zones) = layout.resolve(work, monitor, 0) else { return Vec::new() };
         layout
             .zones
@@ -224,91 +292,63 @@ impl Editor {
             .collect()
     }
 
-    /// Changes the document as one undo step, or as part of the previous step if it has the
-    /// same non-empty `key` and came within a second. If the change fails, or leaves a
+    /// Changes the open layout as one undo step, or as part of the previous step if it has
+    /// the same non-empty `key` and came within a second. If the change fails, or leaves the
     /// layout invalid, nothing changes and the error is shown.
-    pub fn change<T>(&mut self, key: &str, f: impl FnOnce(&mut Doc) -> Result<T, String>) -> Option<T> {
-        let before = self.doc.clone();
-        let locked_before = self.locked_sizes(&before);
-        let (work, monitor) = self.areas();
-        let index = self.layout;
-        let result = f(&mut self.doc);
-        // Dividers that only meet by chance (from older edits) are joined once the layout is touched.
-        if let (Ok(_), Some(l)) = (&result, self.doc.layouts.layouts.get_mut(index)) {
-            if before.layouts.layouts.get(index) != Some(l) {
-                edit::join_coincident(l, work, monitor);
-            }
-        }
-        let result = result.and_then(|v| {
-            match self.doc.layouts.layouts.iter().find_map(|l| l.validate().err().map(|e| (l.name.clone(), e))) {
-                Some((name, e)) => Err(format!("{name}: {e}")),
-                None => Ok(v),
-            }
-        });
-        // Locked zones keep their size, whatever the change (a zone that no longer exists,
-        // after a merge or delete, isn't checked).
-        let result = result.and_then(|v| {
-            let after = self.locked_sizes(&self.doc);
-            let layout = &self.doc.layouts.layouts[self.layout.min(self.doc.layouts.layouts.len() - 1)];
-            for (zone, size) in &locked_before {
-                let now = after.iter().find(|(z, _)| z == zone).map(|(_, s)| *s);
-                if now.is_some_and(|now| now != *size) {
-                    let i = layout.zones.iter().position(|z| z == zone).unwrap_or(0);
-                    let n = self.zone_name(i);
-                    return Err(format!("That would resize zone {n}, which is locked."));
-                }
-            }
-            Ok(v)
-        });
-        // Nor may a change leave zones that only meet by chance (they'd come apart when a
-        // divider or the gaming zone moves).
-        let result = result.and_then(|v| {
-            let (work, monitor) = self.areas();
-            let i = self.layout.min(self.doc.layouts.layouts.len() - 1);
-            let (was, now) = (before.layouts.layouts.get(i), &self.doc.layouts.layouts[i]);
-            let whole = |l: &Layout| edit::stays_whole(l, work, monitor);
-            if was != Some(now) && was.is_some_and(whole) && !whole(now) {
-                return Err(format!("{}.", capitalise(&EditError::ComesApart.to_string())));
-            }
-            Ok(v)
-        });
-        match result {
-            Ok(v) => {
-                self.record(key, before);
-                Some(v)
-            }
-            Err(e) => {
-                self.doc = before;
-                self.set_error(e);
-                None
-            }
-        }
-    }
-
-    /// [`Self::change`] on the selected layout, with the monitor's areas.
     pub fn edit_layout<T>(
         &mut self,
         key: &str,
         f: impl FnOnce(&mut Layout, Rect, Rect) -> Result<T, EditError>,
     ) -> Option<T> {
         let (work, monitor) = self.areas();
-        let i = self.layout;
-        let mut error = None;
-        let result = self.change(key, |d| {
-            f(&mut d.layouts.layouts[i], work, monitor).map_err(|e| {
-                error = Some(e);
-                String::new()
-            })
-        });
-        if let Some(e) = error {
-            let text = self.describe(&e);
-            self.set_error(text);
+        let before = self.current().clone();
+        let mut layout = before.clone();
+        let result = f(&mut layout, work, monitor).map_err(|e| self.describe(&e));
+        let result = result.and_then(|v| self.check(&before, &mut layout).map(|()| v));
+        match result {
+            Ok(v) => {
+                let i = self.layout;
+                self.doc.layouts.layouts[i] = layout;
+                self.record(key, before);
+                Some(v)
+            }
+            Err(e) => {
+                self.set_error(e);
+                None
+            }
         }
-        result
     }
 
-    fn record(&mut self, key: &str, before: Doc) {
-        if self.doc == before {
+    /// Whether `after` (the open layout, changed from `before`) may replace it. Dividers
+    /// that only meet by chance (from older edits) are joined once the layout is touched.
+    fn check(&self, before: &Layout, after: &mut Layout) -> Result<(), String> {
+        if before == after {
+            return Ok(());
+        }
+        let (work, monitor) = self.areas();
+        edit::join_coincident(after, work, monitor);
+        after.validate().map_err(|e| format!("{}: {e}", after.name))?;
+        // Locked zones keep their size, whatever the change (a zone that no longer exists,
+        // after a merge or delete, isn't checked).
+        let now = self.locked_sizes(after);
+        for (zone, size) in &self.locked_sizes(before) {
+            if now.iter().find(|(z, _)| z == zone).is_some_and(|(_, s)| s != size) {
+                let i = after.zones.iter().position(|z| z == zone).unwrap_or(0);
+                let n = zone_name_in(after, i, (work, monitor));
+                return Err(format!("That would resize zone {n}, which is locked."));
+            }
+        }
+        // Nor may a change leave zones that only meet by chance (they'd come apart when a
+        // divider or the gaming zone moves).
+        let whole = |l: &Layout| edit::stays_whole(l, work, monitor);
+        if whole(before) && !whole(after) {
+            return Err(format!("{}.", capitalise(&EditError::ComesApart.to_string())));
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, key: &str, before: Layout) {
+        if *self.current() == before {
             return;
         }
         let joined = !key.is_empty() && matches!(&self.last_change, Some((k, t)) if k == key && self.now - t < 1.0);
@@ -323,23 +363,32 @@ impl Editor {
         self.status = None;
     }
 
-    fn undo(&mut self) {
+    pub(crate) fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub(crate) fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub(crate) fn undo(&mut self) {
         if let Some(prev) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.doc, prev));
+            let i = self.layout;
+            self.redo.push(std::mem::replace(&mut self.doc.layouts.layouts[i], prev));
             self.after_jump();
         }
     }
 
-    fn redo(&mut self) {
+    pub(crate) fn redo(&mut self) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.doc, next));
+            let i = self.layout;
+            self.undo.push(std::mem::replace(&mut self.doc.layouts.layouts[i], next));
             self.after_jump();
         }
     }
 
     fn after_jump(&mut self) {
         self.last_change = None;
-        self.layout = self.layout.min(self.doc.layouts.layouts.len() - 1);
         self.selection = Selection::None;
         self.canvas_drag = None;
     }
@@ -359,16 +408,60 @@ impl Editor {
         }
     }
 
-    fn save(&mut self, overwrite: bool) -> bool {
-        if !overwrite && self.files.stamps() != self.stamps {
-            self.dialog = Some(Dialog::ChangedOnDisk);
+    // --- saving ---
+
+    /// Saves the open layout's changes.
+    pub(crate) fn save(&mut self, overwrite: bool) -> bool {
+        let i = self.layout;
+        let previous = self.saved.layouts.layouts[i].clone();
+        self.saved.layouts.layouts[i] = self.doc.layouts.layouts[i].clone();
+        if self.write(overwrite, true) {
+            return true;
+        }
+        // Not written: the changes are still unsaved.
+        self.saved.layouts.layouts[i] = previous;
+        false
+    }
+
+    /// Throws away the open layout's unsaved changes.
+    pub(crate) fn discard(&mut self) {
+        let i = self.layout;
+        self.doc.layouts.layouts[i] = self.saved.layouts.layouts[i].clone();
+        self.forget_history();
+        self.after_jump();
+        self.status = None;
+    }
+
+    /// Makes a layout-list change (`f` runs on both the editor's and the saved copy) and
+    /// writes it straight away. The open layout's unsaved changes stay unsaved.
+    pub(crate) fn commit(&mut self, f: impl Fn(&mut Doc)) -> bool {
+        let (mut doc, mut saved) = (self.doc.clone(), self.saved.clone());
+        f(&mut doc);
+        f(&mut saved);
+        if let Some((name, e)) =
+            saved.layouts.layouts.iter().find_map(|l| l.validate().err().map(|e| (l.name.clone(), e)))
+        {
+            self.set_error(format!("{name}: {e}"));
             return false;
         }
-        match self.files.save(&self.doc) {
+        (self.doc, self.saved) = (doc, saved);
+        self.write(false, false)
+    }
+
+    /// Writes `saved` to the files, unless they changed on disk (then it asks first).
+    fn write(&mut self, overwrite: bool, edits: bool) -> bool {
+        if !overwrite && self.files.stamps() != self.stamps {
+            self.unwritten |= !edits;
+            self.dialog = Some(Dialog::ChangedOnDisk { edits });
+            return false;
+        }
+        match self.files.save(&self.saved) {
             Ok(stamps) => {
                 self.stamps = stamps;
-                self.saved = self.doc.clone();
-                let text = if core_link::reload() {
+                self.unwritten = false;
+                let text = if !self.notify_tray {
+                    "Saved."
+                } else if core_link::reload() {
                     "Saved. GamingZones is using the new layouts."
                 } else {
                     "Saved. GamingZones isn't running; it will use them when it starts."
@@ -377,6 +470,7 @@ impl Editor {
                 true
             }
             Err(e) => {
+                self.unwritten |= !edits;
                 self.set_error(format!("Couldn't save: {e}"));
                 false
             }
@@ -390,35 +484,52 @@ impl Editor {
 
     // --- layouts ---
 
-    fn new_layout(&mut self) {
+    pub(crate) fn new_layout(&mut self) {
         let id = self.doc.layouts.unique_id("New layout");
-        if self
-            .change("", |d| {
-                d.layouts.layouts.push(edit::new_layout(&id, "New layout"));
-                Ok(())
-            })
-            .is_some()
-        {
-            self.layout = self.doc.layouts.layouts.len() - 1;
-            self.selection = Selection::None;
+        if self.commit(|d| d.layouts.layouts.push(edit::new_layout(&id, "New layout"))) {
+            let layout = self.doc.layouts.layouts.len() - 1;
+            self.request(Goto { monitor: self.monitor, layout });
         }
     }
 
-    fn duplicate_layout(&mut self) {
-        let mut copy = self.current().clone();
+    /// Copies layout `i` as it is saved, and opens the copy.
+    pub(crate) fn duplicate_layout(&mut self, i: usize) {
+        let mut copy = self.saved.layouts.layouts[i].clone();
         copy.name = format!("{} copy", copy.name);
         copy.id = self.doc.layouts.unique_id(&copy.name);
-        let at = self.layout + 1;
-        if self
-            .change("", |d| {
-                d.layouts.layouts.insert(at, copy);
-                Ok(())
-            })
-            .is_some()
-        {
-            self.layout = at;
-            self.selection = Selection::None;
+        let at = i + 1;
+        if self.commit(|d| d.layouts.layouts.insert(at, copy.clone())) {
+            if self.layout >= at {
+                self.layout += 1;
+            }
+            self.request(Goto { monitor: self.monitor, layout: at });
         }
+    }
+
+    pub(crate) fn rename_layout(&mut self, i: usize, name: &str) {
+        let name = name.trim().to_string();
+        if name.is_empty() || self.doc.layouts.layouts.get(i).is_none_or(|l| l.name == name) {
+            return;
+        }
+        if self.commit(|d| d.layouts.layouts[i].name = name.clone()) && i == self.layout {
+            // Undo mustn't bring the old name back.
+            for l in self.undo.iter_mut().chain(&mut self.redo) {
+                l.name = name.clone();
+            }
+        }
+    }
+
+    /// Puts monitor `n` on layout `i`.
+    pub(crate) fn use_on(&mut self, i: usize, n: usize) {
+        let id = self.doc.layouts.layouts[i].id.clone();
+        let m = &self.monitors[n];
+        let (mon_id, name) = (m.id.clone(), m.name.clone());
+        if self.doc.applied.layout_for(&mon_id) == Some(id.as_str()) {
+            return;
+        }
+        self.commit(|d| {
+            d.applied.monitors.insert(mon_id.clone(), MonitorEntry { layout: Some(id.clone()), name: name.clone() });
+        });
     }
 
     /// Monitors (connected or remembered in applied.json) whose entry uses layout `id`.
@@ -450,15 +561,22 @@ impl Editor {
             self.set_error(format!("It's in use on {}. Use another layout there first.", used.join(", ")));
             return;
         }
-        self.change("", |d| {
+        let ok = self.commit(|d| {
             d.layouts.layouts.remove(i);
             if d.applied.default_layout.as_deref() == Some(&id) {
                 d.applied.default_layout = d.layouts.layouts.first().map(|l| l.id.clone());
             }
-            Ok(())
         });
-        self.layout = self.layout.min(self.doc.layouts.layouts.len() - 1);
-        self.selection = Selection::None;
+        if !ok {
+            return;
+        }
+        if i < self.layout {
+            self.layout -= 1;
+        } else if i == self.layout {
+            self.layout = self.layout.min(self.doc.layouts.layouts.len() - 1);
+            self.forget_history();
+            self.selection = Selection::None;
+        }
     }
 
     // --- preview ---
@@ -498,7 +616,7 @@ impl Editor {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let save = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S));
-        if save && self.dirty() {
+        if save && self.dirty() && self.dialog.is_none() {
             self.save(false);
         }
         if ctx.egui_wants_keyboard_input() {
@@ -536,178 +654,77 @@ impl Editor {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Monitor:");
+        ui.horizontal(|ui| {
             for n in 0..self.monitors.len() {
-                let label = self.monitors[n].label(n);
-                if ui.selectable_label(n == self.monitor, label).clicked() && n != self.monitor {
-                    self.monitor = n;
-                    self.select_applied_layout();
+                let (caption, name) = (self.monitors[n].short_label(), self.monitors[n].label(n));
+                let selected = n == self.monitor;
+                if icons::button(ui, Icon::Monitor(n + 1), 30.0, Some(&caption), &name, selected, true).clicked()
+                    && !selected
+                {
+                    self.request_monitor(n);
                 }
             }
             ui.separator();
-            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).on_hover_text("Ctrl+Z").clicked() {
+            if icons::button(ui, Icon::Undo, 24.0, None, "Undo", false, self.can_undo())
+                .on_hover_text("Undo (Ctrl+Z)")
+                .clicked()
+            {
                 self.undo();
             }
-            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo")).on_hover_text("Ctrl+Y").clicked() {
+            if icons::button(ui, Icon::Redo, 24.0, None, "Redo", false, self.can_redo())
+                .on_hover_text("Redo (Ctrl+Y)")
+                .clicked()
+            {
                 self.redo();
             }
             ui.separator();
-            ui.toggle_value(&mut self.preview_on, "Preview on screen")
-                .on_hover_text("Shows this layout's zones on the monitor itself (GamingZones must be running).");
-            ui.separator();
-            let dirty = self.dirty();
-            if ui.add_enabled(dirty, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked() {
-                self.save(false);
-            }
-            match &self.status {
-                Some((text, true)) => {
-                    ui.colored_label(Color32::from_rgb(0xFF, 0x70, 0x60), text);
-                }
-                Some((text, false)) => {
-                    ui.label(text);
-                }
-                None if dirty => {
-                    ui.weak("Unsaved changes");
-                }
-                None => {}
+            if icons::button(ui, Icon::Eye, 26.0, Some("Preview"), "Preview", self.preview_on, true)
+                .on_hover_text("Shows this layout's zones on the monitor itself (GamingZones must be running).")
+                .clicked()
+            {
+                self.preview_on = !self.preview_on;
             }
         });
-        ui.add_space(2.0);
-    }
-
-    fn layout_list(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.heading("Layouts");
-        ui.horizontal(|ui| {
-            if ui.button("New").clicked() {
-                self.new_layout();
-            }
-            if ui.button("Duplicate").clicked() {
-                self.duplicate_layout();
-            }
-            if ui.button("Delete").clicked() {
-                self.dialog = Some(Dialog::DeleteLayout(self.layout));
-            }
-        });
-        ui.add_space(6.0);
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            for i in 0..self.doc.layouts.layouts.len() {
-                self.card(ui, i);
-                ui.add_space(6.0);
-            }
-        });
-    }
-
-    /// A layout card: a small picture of its zones on the selected monitor, and its name.
-    fn card(&mut self, ui: &mut egui::Ui, i: usize) {
-        let (work, monitor) = self.areas();
-        let layout = &self.doc.layouts.layouts[i];
-        let width = ui.available_width();
-        let picture_h = (width - 12.0) * work.height() as f32 / work.width().max(1) as f32;
-        let picture_h = picture_h.clamp(30.0, 160.0);
-        let (response, painter) = ui.allocate_painter(Vec2::new(width, picture_h + 32.0), Sense::click());
-        let r = response.rect;
-        let selected = i == self.layout;
-        let visuals = ui.visuals();
-        let bg = if selected {
-            visuals.selection.bg_fill.gamma_multiply(0.5)
-        } else if response.hovered() {
-            visuals.widgets.hovered.bg_fill
-        } else {
-            visuals.faint_bg_color
-        };
-        painter.rect_filled(r, 6.0, bg);
-        if selected {
-            painter.rect_stroke(r, 6.0, visuals.selection.stroke, egui::StrokeKind::Inside);
-        }
-        let picture = egui::Rect::from_min_size(r.min + Vec2::new(6.0, 6.0), Vec2::new(width - 12.0, picture_h));
-        if let Ok(zones) = layout.resolve(work, monitor, self.deadzone) {
-            for z in &zones {
-                let zr = canvas::map_rect(z.rect, work, picture).shrink(1.0);
-                let fill = if z.gaming {
-                    canvas::GAMING_FILL
-                } else if z.disabled {
-                    canvas::DISABLED_FILL
-                } else {
-                    canvas::ZONE_FILL
-                };
-                painter.rect_filled(zr, 2.0, fill);
-            }
-        }
-        let text_y = r.bottom() - 13.0;
-        painter.text(
-            egui::pos2(r.left() + 8.0, text_y),
-            egui::Align2::LEFT_CENTER,
-            &layout.name,
-            egui::FontId::proportional(14.0),
-            visuals.strong_text_color(),
-        );
-        if self.doc.applied.layout_for(&self.mon().id) == Some(layout.id.as_str()) {
-            painter.text(
-                egui::pos2(r.right() - 8.0, text_y),
-                egui::Align2::RIGHT_CENTER,
-                "in use",
-                egui::FontId::proportional(12.0),
-                visuals.weak_text_color(),
-            );
-        }
-        if response.clicked() && !selected {
-            self.layout = i;
-            self.selection = Selection::None;
-        }
+        ui.add_space(4.0);
     }
 
     fn properties(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        ui.heading("Properties");
+        ui.add_space(4.0);
         self.layout_props(ui);
         ui.separator();
         self.selection_props(ui);
-        ui.separator();
-        self.gaming_panel(ui);
         ui.separator();
         help(ui);
     }
 
     fn layout_props(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Layout");
-        let mut name = self.current().name.clone();
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            if ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY)).changed() {
-                let i = self.layout;
-                self.change("name", |d| {
-                    d.layouts.layouts[i].name = name;
-                    Ok(())
+        let layout = self.current();
+        let (name, id) = (layout.name.clone(), layout.id.clone());
+        ui.label(RichText::new(&name).font(style::semibold(15.0)))
+            .on_hover_text(format!("id: {id}\napplied.json refers to the layout by this; renaming doesn't change it."));
+        let (work, monitor) = self.areas();
+        if let Ok(zones) = layout.resolve(work, monitor, 0) {
+            let n = (0..layout.zones.len()).filter(|&i| zone_number(&zones, i).is_some()).count();
+            ui.weak(if n == 1 { "1 zone".to_string() } else { format!("{n} zones") });
+        }
+        ui.add_space(6.0);
+        let used = self.used_on(&id);
+        if !used.is_empty() {
+            ui.label("Used on:");
+            for text in used {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                    icons::paint(ui.painter(), r, Icon::Monitor(0), ui.visuals().text_color());
+                    ui.label(text);
                 });
             }
-        });
-        let id = self.current().id.clone();
-        ui.label(RichText::new(format!("id: {id}")).weak())
-            .on_hover_text("applied.json refers to the layout by this; renaming doesn't change it.");
-        let mon_id = self.mon().id.clone();
-        if self.doc.applied.layout_for(&mon_id) == Some(id.as_str()) {
-            ui.label("✔ In use on this monitor");
-        } else if ui.button("Use on this monitor").clicked() {
-            let name = self.mon().name.clone();
-            self.change("", |d| {
-                d.applied.monitors.insert(mon_id, MonitorEntry { layout: Some(id), name });
-                Ok(())
-            });
         }
-        let used = self.used_on(&self.current().id);
-        if !used.is_empty() {
-            ui.label(RichText::new(format!("Used on: {}", used.join(", "))).weak());
-        }
-        let (work, monitor) = self.areas();
-        if let Ok(zones) = self.current().resolve(work, monitor, self.deadzone) {
-            let disabled = zones.iter().filter(|z| z.disabled && !z.rect.is_empty()).count();
-            let count = zones.iter().filter(|z| !z.gaming).count();
-            let mut text = format!("{count} zones");
-            if disabled > 0 {
-                text += &format!(", {disabled} greyed (under the {} px deadzone)", self.deadzone);
-            }
-            ui.label(text);
+        if self.doc.applied.layout_for(&self.mon().id) != Some(id.as_str())
+            && style::button(ui, "Use on this monitor").clicked()
+        {
+            self.use_on(self.layout, self.monitor);
         }
     }
 
@@ -717,22 +734,20 @@ impl Editor {
             Selection::Zones(v) if !v.is_empty() => {
                 ui.heading(format!("{} zones", v.len()));
                 ui.horizontal(|ui| {
-                    if ui.button("Merge").clicked() {
+                    if style::button(ui, "Merge").clicked() {
                         if let Some(i) = self.edit_layout("", |l, w, m| edit::merge(l, &v, w, m)) {
                             self.selection = Selection::Zones(vec![i]);
                         }
                     }
-                    if ui.button("Delete").on_hover_text("Delete key").clicked() {
+                    if style::button(ui, "Delete").on_hover_text("Delete key").clicked() {
                         self.delete_selected_zones();
                     }
                 });
             }
             Selection::Divider(id) => self.divider_props(ui, &id),
-            Selection::Gaming => {
-                ui.weak("The gaming zone: its size and position are below.");
-            }
+            Selection::Gaming => self.gaming_panel(ui),
             _ => {
-                ui.weak("Select a zone or a divider to change it.");
+                ui.weak("Select a zone, a divider or the gaming zone to change it.");
             }
         }
     }
@@ -754,13 +769,13 @@ impl Editor {
         let locked = self.is_locked(i);
         ui.horizontal(|ui| {
             ui.heading(format!("Zone {name}"));
-            let mut lock = locked;
-            if ui
-                .toggle_value(&mut lock, "🔒 Lock size")
-                .on_hover_text("Keeps its size: moving a divider next to it pushes it along instead.")
-                .changed()
-            {
-                self.set_locked(i, lock);
+            let tip = if locked {
+                "Locked: it keeps its size, and dividers next to it push it along. Click to unlock."
+            } else {
+                "Lock its size: dividers next to it push it along instead of resizing it."
+            };
+            if icons::button(ui, Icon::Lock(locked), 18.0, None, "Lock", locked, true).on_hover_text(tip).clicked() {
+                self.set_locked(i, !locked);
             }
         });
         ui.add_enabled_ui(!locked, |ui| self.zone_size_boxes(ui, i, r, work));
@@ -768,11 +783,22 @@ impl Editor {
             ui.weak("Unlock it to change its size.");
         }
         ui.weak(format!("Top-left corner at ({}, {})", r.left - work.left, r.top - work.top));
-        ui.horizontal(|ui| {
-            if ui.button("Delete").on_hover_text("Delete key").clicked() {
-                self.delete_selected_zones();
+        if style::button(ui, "Delete").on_hover_text("Delete key").clicked() {
+            self.delete_selected_zones();
+        }
+        if self.current().gaming_zones.is_empty() {
+            ui.add_space(4.0);
+            if style::wide_button(ui, &format!("Make zone {name} the gaming zone"))
+                .on_hover_text(
+                    "A zone of an exact size (a game's resolution). It takes this zone's space; make it smaller \
+                     and the rest of that space becomes normal zones.",
+                )
+                .clicked()
+                && self.edit_layout("", |l, w, m| edit::make_gaming_zone(l, i, w, m)).is_some()
+            {
+                self.selection = Selection::Gaming;
             }
-        });
+        }
     }
 
     /// Zone `i`'s width and height, in px and % of the area.
@@ -844,10 +870,10 @@ impl Editor {
             }
         }
         ui.horizontal(|ui| {
-            if !matches!(guide.anchor, Anchor::Px(_)) && ui.button("Make it fixed px").clicked() {
+            if !matches!(guide.anchor, Anchor::Px(_)) && style::button(ui, "Make it fixed px").clicked() {
                 self.edit_layout("", |l, w, m| edit::convert_guide(l, id, GuideKind::Px, w, m));
             }
-            if !matches!(guide.anchor, Anchor::Percent(_)) && ui.button("Make it % of the area").clicked() {
+            if !matches!(guide.anchor, Anchor::Percent(_)) && style::button(ui, "Make it % of the area").clicked() {
                 self.edit_layout("", |l, w, m| edit::convert_guide(l, id, GuideKind::Percent, w, m));
             }
         });
@@ -857,19 +883,20 @@ impl Editor {
         let Some(dialog) = self.dialog.take() else { return };
         let mut open = true;
         let modal = |id: &str| egui::Modal::new(Id::new(id));
+        let button = |ui: &mut egui::Ui, text: &str| style::sized_button(ui, text, style::DIALOG_W).clicked();
         match &dialog {
             Dialog::DeleteLayout(i) => {
                 let name = self.doc.layouts.layouts.get(*i).map(|l| l.name.clone()).unwrap_or_default();
                 let r = modal("delete").show(ctx, |ui| {
                     ui.heading("Delete layout");
-                    ui.label(format!("Delete \"{name}\"? You can undo this until you close the editor."));
+                    ui.label(format!("Delete \"{name}\"? This can't be undone."));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Delete").clicked() {
+                        if button(ui, "Delete") {
                             self.delete_layout(*i);
                             open = false;
                         }
-                        if ui.button("Cancel").clicked() {
+                        if button(ui, "Cancel") {
                             open = false;
                         }
                     });
@@ -879,41 +906,66 @@ impl Editor {
             Dialog::UnsavedOnClose => {
                 let r = modal("unsaved").show(ctx, |ui| {
                     ui.heading("Unsaved changes");
-                    ui.label("Save the layouts before closing?");
+                    ui.label(format!("Save the changes to \"{}\" before closing?", self.current().name));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if button(ui, "Save") {
                             open = false;
                             self.close_after_save = true;
                             if self.save(false) {
                                 self.close(ctx);
                             }
                         }
-                        if ui.button("Don't save").clicked() {
+                        if button(ui, "Don't save") {
                             open = false;
                             self.close(ctx);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if button(ui, "Cancel") {
                             open = false;
                         }
                     });
                 });
                 open &= !r.should_close();
             }
-            Dialog::ChangedOnDisk => {
+            Dialog::UnsavedOnSwitch(to) => {
+                let r = modal("switch").show(ctx, |ui| {
+                    ui.heading("Unsaved changes");
+                    ui.label(format!("Save the changes to \"{}\"?", self.current().name));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if button(ui, "Save") {
+                            open = false;
+                            if self.save(false) {
+                                self.go(*to);
+                            }
+                        }
+                        if button(ui, "Discard") {
+                            open = false;
+                            self.discard();
+                            self.go(*to);
+                        }
+                        if button(ui, "Cancel") {
+                            open = false;
+                        }
+                    });
+                });
+                open &= !r.should_close();
+            }
+            Dialog::ChangedOnDisk { edits } => {
                 let r = modal("changed").show(ctx, |ui| {
                     ui.heading("Files changed");
                     ui.label("layouts.json or applied.json was changed outside the editor after it opened.");
                     ui.label("Saving replaces those changes with what's in the editor.");
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Save anyway").clicked() {
+                        if style::sized_button(ui, "Save anyway", style::BUTTON_W).clicked() {
                             open = false;
-                            if self.save(true) && self.close_after_save {
+                            let saved = if *edits { self.save(true) } else { self.write(true, false) };
+                            if saved && self.close_after_save {
                                 self.close(ctx);
                             }
                         }
-                        if ui.button("Cancel").clicked() {
+                        if button(ui, "Cancel") {
                             open = false;
                             self.close_after_save = false;
                         }
@@ -941,8 +993,8 @@ impl Editor {
                     });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        refresh = ui.button("Refresh").clicked();
-                        if ui.button("Cancel").clicked() {
+                        refresh = button(ui, "Refresh");
+                        if button(ui, "Cancel") {
                             open = false;
                         }
                     });
@@ -975,11 +1027,17 @@ impl Editor {
                 self.files.dir.display()
             ));
             ui.add_space(12.0);
-            if ui.button("Close").clicked() {
+            if style::button(ui, "Close").clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
     }
+}
+
+/// Zone `i`'s number in `layout` as the canvas shows it (empty zones have none).
+fn zone_name_in(layout: &Layout, i: usize, (work, monitor): (Rect, Rect)) -> String {
+    let zones = layout.resolve(work, monitor, 0).unwrap_or_default();
+    zone_number(&zones, i).map_or_else(|| format!("{}", i + 1), |n| n.to_string())
 }
 
 fn capitalise(s: &str) -> String {
@@ -996,22 +1054,23 @@ pub fn number_box<N: egui::emath::Numeric>(
     setup: impl FnOnce(egui::DragValue<'_>) -> egui::DragValue<'_>,
 ) -> bool {
     ui.horizontal(|ui| {
-        let label = ui.add_sized([110.0, 18.0], egui::Label::new(label));
+        let label = style::label_cell(ui, label);
         let drag = setup(egui::DragValue::new(value).update_while_editing(false));
-        ui.add(drag).labelled_by(label.id).changed()
+        ui.add_sized([style::NUMBER_W, style::ROW_H], drag).labelled_by(label.id).changed()
     })
     .inner
 }
 
 fn help(ui: &mut egui::Ui) {
-    egui::CollapsingHeader::new("How to edit").default_open(true).show(ui, |ui| {
+    egui::CollapsingHeader::new("How to edit").default_open(false).show(ui, |ui| {
         for line in [
             "Click a zone to split it. Hold Shift to split it the other way.",
             "Drag a divider to move it. Click it to type an exact position.",
             "Ctrl+click zones, or drag across them, to select them. Then Merge or Delete.",
-            "Select a zone to type its exact width or height. Lock a zone to keep its size: dividers next to it push it along.",
+            "Select a zone to type its exact width or height. Click a zone's padlock to keep its size: dividers next to it push it along.",
             "Select a zone and make it the gaming zone. Make the gaming zone smaller and the rest of that space becomes zones.",
             "Drag the gaming zone to move it: the zones beside it make room.",
+            "Right-click a layout to rename, copy or delete it, or to use it on a monitor. Double-click its name to rename it.",
             "Ctrl+Z / Ctrl+Y undo and redo. Ctrl+S saves.",
         ] {
             ui.label(format!("• {line}"));
@@ -1043,10 +1102,15 @@ impl Editor {
         self.handle_close(&ctx);
         self.shortcuts(&ctx);
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
-        egui::Panel::left("layouts").resizable(false).exact_size(240.0).show(ui, |ui| self.layout_list(ui));
-        egui::Panel::right("properties").resizable(false).exact_size(360.0).show(ui, |ui| {
+        egui::Panel::left("layouts").resizable(false).exact_size(260.0).show(ui, |ui| self.layout_list(ui));
+        egui::Panel::right("properties").resizable(false).exact_size(330.0).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.properties(ui));
         });
+        egui::Panel::bottom("footer")
+            .resizable(false)
+            .exact_size(44.0)
+            .show_separator_line(false)
+            .show(ui, |ui| self.footer(ui));
         egui::CentralPanel::default().show(ui, |ui| self.canvas(ui));
         self.dialogs(&ctx);
         self.sync_preview();

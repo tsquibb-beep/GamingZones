@@ -67,4 +67,8 @@ It embeds egui's default fonts (crate `epaint_default_fonts`), each under its ow
 | Noto Emoji | SIL Open Font License 1.1 |
 | emoji-icon-font | MIT |
 
+It also embeds **Lexend** (`res/fonts/Lexend-VariableFont_wght.ttf`, from https://github.com/googlefonts/lexend),
+the editor's main font: Copyright 2018 The Lexend Project Authors, licensed under the SIL Open Font License 1.1
+(full text in `res/fonts/OFL.txt`).
+
 None of this is linked into the always-running `gamingzones.exe`.

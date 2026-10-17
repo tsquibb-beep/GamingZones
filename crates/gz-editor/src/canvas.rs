@@ -8,6 +8,7 @@ use gz_core::layout::{zone_number, Axis, ResolvedZone};
 use gz_core::Rect;
 
 use crate::app::{Editor, Selection, MIN_ZONE_PX};
+use crate::icons::{self, Icon};
 
 pub const ZONE_FILL: Color32 = Color32::from_rgb(0x3B, 0x46, 0x60);
 pub const DISABLED_FILL: Color32 = Color32::from_rgb(0x46, 0x46, 0x46);
@@ -25,6 +26,10 @@ const TEXT: Color32 = Color32::from_rgb(0xF0, 0xF2, 0xF6);
 const TEXT_WEAK: Color32 = Color32::from_rgb(0xA8, 0xB0, 0xC0);
 /// How close (points) the pointer must be to grab a divider.
 const GRAB: f32 = 5.0;
+/// A zone's padlock: its size, and how far it sits from the zone's top-right corner (more
+/// than `GRAB`, so it never gets in the way of a divider).
+const LOCK_SIZE: f32 = 18.0;
+const LOCK_INSET: f32 = 10.0;
 
 #[derive(Clone)]
 pub enum CanvasDrag {
@@ -48,6 +53,8 @@ enum Target {
     Divider(String, Axis),
     Gaming,
     Zone(usize),
+    /// Zone `i`'s padlock.
+    Lock(usize),
     Nothing,
 }
 
@@ -88,7 +95,19 @@ impl View {
     }
 }
 
-/// What's under point `p`: the gaming zone, then dividers, then the smallest zone.
+/// Where zone `r`'s padlock goes, if the zone is big enough to have one.
+pub(crate) fn lock_rect(r: egui::Rect) -> Option<egui::Rect> {
+    let room = LOCK_SIZE + 2.0 * LOCK_INSET + 4.0;
+    (r.width() >= room && r.height() >= room).then(|| {
+        egui::Rect::from_min_size(
+            egui::pos2(r.right() - LOCK_INSET - LOCK_SIZE, r.top() + LOCK_INSET),
+            Vec2::splat(LOCK_SIZE),
+        )
+    })
+}
+
+/// What's under point `p`: the gaming zone, then dividers, then the smallest zone (or its
+/// padlock).
 fn target(view: &View, p: Pos2, zones: &[ResolvedZone], normal: usize, dividers: &[Divider]) -> Target {
     let (x, y) = view.px(p);
     if zones.get(normal).is_some_and(|g| g.rect.contains(x, y)) {
@@ -108,7 +127,13 @@ fn target(view: &View, p: Pos2, zones: &[ResolvedZone], normal: usize, dividers:
         .enumerate()
         .filter(|(_, z)| !z.rect.is_empty() && z.rect.contains(x, y))
         .min_by_key(|(_, z)| z.rect.width() as i64 * z.rect.height() as i64)
-        .map_or(Target::Nothing, |(i, _)| Target::Zone(i))
+        .map_or(Target::Nothing, |(i, z)| {
+            if lock_rect(view.rect(z.rect)).is_some_and(|l| l.contains(p)) {
+                Target::Lock(i)
+            } else {
+                Target::Zone(i)
+            }
+        })
 }
 
 /// Zones inside the bounding rectangle of zones `a` and `b`.
@@ -142,6 +167,7 @@ impl Editor {
         let (work, monitor) = self.areas();
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let view = View::fit(response.rect.shrink(16.0), monitor);
+        self.canvas_monitor = view.rect(monitor);
         let (shift, ctrl) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
 
         // Input, against the layout as it was at the start of the frame.
@@ -169,7 +195,7 @@ impl Editor {
                         self.selection = Selection::Gaming;
                         Some(CanvasDrag::Gaming { dx: x - g.left, dy: y - g.top })
                     }
-                    Some(Target::Zone(i)) => Some(CanvasDrag::Select { from: i }),
+                    Some(Target::Zone(i) | Target::Lock(i)) => Some(CanvasDrag::Select { from: i }),
                     _ => None,
                 };
             }
@@ -182,7 +208,7 @@ impl Editor {
                         }
                         CanvasDrag::Gaming { dx, dy } => self.move_gaming_zone(x - dx, y - dy),
                         CanvasDrag::Select { from } => {
-                            if let Target::Zone(to) = at(p) {
+                            if let Target::Zone(to) | Target::Lock(to) = at(p) {
                                 self.selection = Selection::Zones(range(&zones, normal, from, to));
                             }
                         }
@@ -197,6 +223,10 @@ impl Editor {
                     match at(p) {
                         Target::Divider(guide, _) => self.selection = Selection::Divider(guide),
                         Target::Gaming => self.selection = Selection::Gaming,
+                        Target::Lock(i) => {
+                            let locked = self.is_locked(i);
+                            self.set_locked(i, !locked);
+                        }
                         Target::Zone(i) if ctrl => {
                             let mut v = match &self.selection {
                                 Selection::Zones(v) => v.clone(),
@@ -249,28 +279,36 @@ impl Editor {
             if z.rect.is_empty() {
                 continue;
             }
-            let r = view.rect(z.rect).shrink(1.0);
+            // Drawn to their exact edges, square, so they meet each other and the gaming zone
+            // (the dividers cover the seams between zones).
+            let r = view.rect(z.rect);
+            let hovered = matches!(hover, Target::Zone(h) | Target::Lock(h) if h == i);
             let fill = if selected.contains(&i) {
                 SELECTED_FILL
             } else if z.disabled {
                 DISABLED_FILL
-            } else if hover == Target::Zone(i) {
+            } else if hovered {
                 ZONE_HOVER
             } else {
                 ZONE_FILL
             };
-            painter.rect_filled(r, 3.0, fill);
-            painter.rect_stroke(r, 3.0, Stroke::new(1.0, ZONE_STROKE), StrokeKind::Inside);
-            let lock = if self.is_locked(i) { "🔒 " } else { "" };
-            let size = format!("{lock}{} × {}", z.rect.width(), z.rect.height());
+            painter.rect_filled(r, 0.0, fill);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, ZONE_STROKE), StrokeKind::Inside);
+            let size = format!("{} × {}", z.rect.width(), z.rect.height());
             let number = zone_number(&zones, i).map_or(String::new(), |n| n.to_string());
             label(&painter, r, &number, &size, if z.disabled { TEXT_WEAK } else { TEXT });
+            // The padlock: always when locked, otherwise only while the mouse is over the zone.
+            let locked = self.is_locked(i);
+            if let (Some(lr), true) = (lock_rect(r), locked || hovered) {
+                let colour = if locked || hover == Target::Lock(i) { TEXT } else { TEXT_WEAK.gamma_multiply(0.7) };
+                icons::paint(&painter, lr, Icon::Lock(locked), colour);
+            }
         }
         if let Some(g) = zones.get(normal) {
             let r = view.rect(g.rect);
             let fill = if self.selection == Selection::Gaming { GAMING_SELECTED } else { GAMING_FILL };
-            painter.rect_filled(r, 3.0, fill.gamma_multiply(0.9));
-            painter.rect_stroke(r, 3.0, Stroke::new(2.0, GAMING_STROKE), StrokeKind::Inside);
+            painter.rect_filled(r, 0.0, fill.gamma_multiply(0.9));
+            painter.rect_stroke(r, 0.0, Stroke::new(2.0, GAMING_STROKE), StrokeKind::Inside);
             label(&painter, r, "G", &format!("{} × {}", g.rect.width(), g.rect.height()), TEXT);
         }
         for d in &dividers {
@@ -300,6 +338,7 @@ impl Editor {
             (Some(CanvasDrag::Divider { .. }), _) | (None, Target::Divider(..)) => CursorIcon::ResizeVertical,
             (Some(CanvasDrag::Gaming { .. }), _) => CursorIcon::Grabbing,
             (None, Target::Gaming) => CursorIcon::Grab,
+            (None, Target::Lock(_)) => CursorIcon::PointingHand,
             (None, Target::Zone(_)) if ctrl => CursorIcon::PointingHand,
             (None, Target::Zone(_)) => CursorIcon::Crosshair,
             _ => CursorIcon::Default,
@@ -318,6 +357,39 @@ impl Editor {
             painter.line_segment(ends, Stroke::new(1.5, Color32::from_white_alpha(170)));
             painter.text(p + Vec2::new(10.0, -10.0), Align2::LEFT_BOTTOM, text, FontId::proportional(12.0), TEXT);
         }
+    }
+
+    /// Under the canvas: the status line, and Discard / Save while the layout has unsaved
+    /// changes.
+    pub fn footer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_centered(|ui| {
+            match &self.status {
+                Some((text, true)) => {
+                    ui.colored_label(Color32::from_rgb(0xFF, 0x70, 0x60), text);
+                }
+                Some((text, false)) => {
+                    ui.label(text);
+                }
+                None if self.dirty() => {
+                    ui.weak("Unsaved changes");
+                }
+                None => {}
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !self.dirty() {
+                    return;
+                }
+                if icons::labelled(ui, Icon::Save, "Save", true).on_hover_text("Ctrl+S").clicked() {
+                    self.save(false);
+                }
+                if icons::labelled(ui, Icon::Bin, "Discard", false)
+                    .on_hover_text("Throw away the changes to this layout since it was last saved.")
+                    .clicked()
+                {
+                    self.discard();
+                }
+            });
+        });
     }
 
     /// Splits zone `i` at (`x`, `y`): vertically, or horizontally with Shift.

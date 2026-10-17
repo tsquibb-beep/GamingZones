@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "gamingzones"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "embed-resource",
  "gz-core",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "gz-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "gz-editor"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eframe",
  "egui_kittest",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "gz-win"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gz-core",
  "windows",
@@ -1750,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "ruler"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "embed-resource",
  "gz-core",
