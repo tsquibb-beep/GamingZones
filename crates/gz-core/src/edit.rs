@@ -467,25 +467,26 @@ fn sides(z: &Zone, axis: Axis) -> (&String, &String) {
     }
 }
 
-/// Whether guide `id` is a gaming zone's edge or is positioned from one (directly or through
-/// other guides), so it moves when the gaming zone does.
+/// Whether guide `id` moves rigidly with the gaming zone: it's one of its edges, a fixed
+/// distance from one, or a split between two such guides (inside its leftover space). A
+/// split between the gaming zone and something that stays put (Tom's "Issue2": a column
+/// split between its right border and the screen's edge) doesn't follow it.
 pub fn follows_gaming(layout: &Layout, id: &str) -> bool {
-    let mut todo = vec![id.to_string()];
-    let mut seen = HashSet::new();
-    while let Some(id) = todo.pop() {
-        if parse_gaming_guide(&id).is_some() {
+    fn follows(layout: &Layout, id: &str, seen: &mut Vec<String>) -> bool {
+        if parse_gaming_guide(id).is_some() {
             return true;
         }
-        if !seen.insert(id.clone()) {
-            continue;
+        if seen.iter().any(|s| s == id) {
+            return false;
         }
+        seen.push(id.to_string());
         match layout.guides.iter().find(|g| g.id == id).map(|g| &g.anchor) {
-            Some(Anchor::Between { a, b, .. }) => todo.extend([a.clone(), b.clone()]),
-            Some(Anchor::Offset { from, .. }) => todo.push(from.clone()),
-            _ => {}
+            Some(Anchor::Offset { from, .. }) => follows(layout, from, seen),
+            Some(Anchor::Between { a, b, .. }) => follows(layout, a, seen) && follows(layout, b, seen),
+            _ => false,
         }
     }
-    false
+    follows(layout, id, &mut Vec::new())
 }
 
 pub fn guide_mut<'a>(layout: &'a mut Layout, id: &str) -> Result<&'a mut Guide, EditError> {
@@ -1727,6 +1728,49 @@ mod tests {
         assert_eq!(rects(&l), before);
         assert!(stays_whole(&l, WORK, MONITOR));
         assert!(!join_coincident(&mut l, WORK, MONITOR));
+    }
+
+    #[test]
+    fn tom_issue2_locked_zone_beyond_a_split() {
+        // Tom's "Issue2": the right column (from the gaming zone's right border g2 to the
+        // screen's edge) split by g5; zone 5 (top right, g5..area.right) locked. Zone 4
+        // (g2..g5) couldn't be resized: g5 was taken to follow the gaming zone, so moving it
+        // meant pushing locked zone 5 into the screen's edge.
+        let json = r#"{ "id": "issue2", "name": "Issue2",
+            "gaming_zones": [ { "size": { "pixels": { "w": 3145, "h": 1526 } }, "x": 1850, "y": 532, "from_zone": true } ],
+            "guides": [ { "id": "g1", "axis": "vertical", "anchor": { "offset": { "from": "gz0.left", "px": 0 } } },
+                        { "id": "g2", "axis": "vertical", "anchor": { "offset": { "from": "gz0.right", "px": 0 } } },
+                        { "id": "g3", "axis": "horizontal", "anchor": { "offset": { "from": "gz0.top", "px": 0 } } },
+                        { "id": "g4", "axis": "horizontal", "anchor": { "offset": { "from": "gz0.bottom", "px": 0 } } },
+                        { "id": "g5", "axis": "vertical", "anchor": { "between": { "a": "g2", "b": "area.right", "fraction": 0.545 } } },
+                        { "id": "g6", "axis": "horizontal", "anchor": { "between": { "a": "area.top", "b": "area.bottom", "fraction": 0.5328 } } } ],
+            "zones": [ { "left": "area.left", "right": "g1", "top": "area.top", "bottom": "area.bottom" },
+                       { "left": "g1", "right": "g2", "top": "area.top", "bottom": "g3" },
+                       { "left": "g1", "right": "g2", "top": "g3", "bottom": "gz0.top" },
+                       { "left": "g1", "right": "gz0.left", "top": "gz0.top", "bottom": "gz0.bottom" },
+                       { "left": "gz0.right", "right": "g2", "top": "gz0.top", "bottom": "gz0.bottom" },
+                       { "left": "g1", "right": "g2", "top": "gz0.bottom", "bottom": "g4" },
+                       { "left": "g1", "right": "g2", "top": "g4", "bottom": "area.bottom" },
+                       { "left": "g2", "right": "g5", "top": "area.top", "bottom": "area.bottom" },
+                       { "left": "g5", "right": "area.right", "top": "area.top", "bottom": "g6" },
+                       { "left": "g5", "right": "area.right", "top": "g6", "bottom": "area.bottom" } ] }"#;
+        let l: Layout = serde_json::from_str(json).unwrap();
+        let locked = [8];
+        assert!(!follows_gaming(&l, "g5"));
+        // Zone 4 (626 wide) to 1000: its right edge can't move (zone 5 is locked against the
+        // screen's edge), so its left edge does, moving the gaming zone left.
+        let mut t = l.clone();
+        resize_zone(&mut t, 7, Axis::Vertical, 1000, &locked, WORK, MONITOR).unwrap();
+        let r = rects(&t);
+        assert_eq!((r[7].width(), r[8].width(), r[10]), (1000, 523, Rect::new(1476, 532, 4621, 2058)));
+        assert_eq!(r[0].width(), 1476);
+        // Dragging the border between zone 4 and the gaming zone's column, either way.
+        for pos in [4500, 5300] {
+            let mut t = l.clone();
+            move_divider(&mut t, "g2", pos, &locked, WORK, MONITOR).unwrap();
+            let r = rects(&t);
+            assert_eq!((r[10].right, r[10].width(), r[8].width(), r[7].left), (pos, 3145, 523, pos));
+        }
     }
 
     #[test]
