@@ -216,9 +216,9 @@ pub const MIN_ZONE_PX: i32 = 10;
 ///   a new fraction instead of moving with it), so only the zones on either side change.
 /// - A zone in `locked` keeps its size: it's pushed along, and the next unlocked zone gives
 ///   or takes the space.
-/// - The gaming zone keeps its size too. A divider that follows it (the edge of its
-///   leftover space) first shrinks the leftover zone between them to nothing, then pushes
-///   the gaming zone along, and everything that follows it.
+/// - The gaming zone keeps its size too, but not its place. A divider against it moves it
+///   (either way), and everything that follows it. A divider with a leftover zone between
+///   them moves on its own, resizing the leftover zone; once that's gone it pushes.
 pub fn move_divider(
     layout: &mut Layout,
     id: &str,
@@ -235,6 +235,17 @@ pub fn move_divider(
     let alone = Group { guides: vec![id.to_string()], gaming: false };
     if !follows_gaming(layout, id) {
         let group = grow(layout, alone, axis, locked, true)?;
+        return shift_within_limits(layout, &group, axis, delta, area, monitor);
+    }
+    let against = |l: &Layout| -> Result<bool, EditError> {
+        let at = position(&l.guide_positions(area, monitor)?, id)?;
+        Ok(l.gaming_rects(area, monitor)?.iter().any(|g| {
+            let (start, end) = span(*g, axis);
+            at == start || at == end
+        }))
+    };
+    if against(layout)? {
+        let group = grow(layout, Group { guides: vec![id.to_string()], gaming: true }, axis, locked, true)?;
         return shift_within_limits(layout, &group, axis, delta, area, monitor);
     }
     let first = {
@@ -1421,17 +1432,55 @@ mod tests {
         // Typing the left zone's width does the same.
         resize_zone(&mut l, 0, Axis::Vertical, 2400, &[], WORK, MONITOR).unwrap();
         assert_eq!(gaming(&l), Rect::new(2400, 0, 4400, 2500));
-        // Making it smaller (typed or dragged) leaves it where it is, with a leftover zone beside it.
+        // Tom: only its size is kept, not its place. Making the zone beside it smaller
+        // (typed or dragged) brings it along; no leftover zone opens up.
         resize_zone(&mut l, 0, Axis::Vertical, 2028, &[], WORK, MONITOR).unwrap();
-        assert_eq!(gaming(&l), Rect::new(2400, 0, 4400, 2500));
-        assert_eq!(rects(&l)[2], Rect::new(2028, 0, 2400, 2500)); // left of it
-                                                                  // Dragging back in closes that first, then pushes.
-        move_divider(&mut l, "g1", 2500, &[], WORK, MONITOR).unwrap();
-        assert_eq!(gaming(&l), Rect::new(2500, 0, 4500, 2500));
+        assert_eq!(gaming(&l), Rect::new(2028, 0, 4028, 2500));
         assert!(rects(&l)[2].is_empty());
-        // Pushed as far as the zone beyond allows (10 px left of it).
+        // With a leftover zone between them (it was made smaller), the divider resizes that
+        // first, then pushes.
+        resize_gaming(&mut l, 1800, 2500).unwrap(); // 2128..3928: 100 px either side
+        assert_eq!(rects(&l)[2], Rect::new(2028, 0, 2128, 2500));
+        move_divider(&mut l, "g1", 1900, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2128, 0, 3928, 2500));
+        assert_eq!(rects(&l)[2], Rect::new(1900, 0, 2128, 2500));
+        move_divider(&mut l, "g1", 2228, &[], WORK, MONITOR).unwrap();
+        assert_eq!(gaming(&l), Rect::new(2228, 0, 4028, 2500));
+        assert!(rects(&l)[2].is_empty());
+        // Pushed as far as the zone beyond allows (10 px left of it, past the 100 px leftover).
         move_divider(&mut l, "g1", 6000, &[], WORK, MONITOR).unwrap();
-        assert_eq!(gaming(&l), Rect::new(4134, 0, 6134, 2500));
+        assert_eq!(gaming(&l), Rect::new(4234, 0, 6034, 2500));
+    }
+
+    #[test]
+    fn tom_issue1_dragging_the_border_above_it() {
+        // Tom's "Issue1": the middle of a middle column made the gaming zone. Dragging the
+        // border between zone 2 (above) and the gaming zone up split zone 2: a leftover zone
+        // opened. It should move the gaming zone up instead (same size).
+        let json = r#"{ "id": "issue1", "name": "Issue1",
+            "gaming_zones": [ { "size": { "pixels": { "w": 3145, "h": 1526 } }, "x": 1363, "y": 533, "from_zone": true } ],
+            "guides": [ { "id": "g1", "axis": "vertical", "anchor": { "offset": { "from": "gz0.left", "px": 0 } } },
+                        { "id": "g2", "axis": "vertical", "anchor": { "offset": { "from": "gz0.right", "px": 0 } } },
+                        { "id": "g3", "axis": "horizontal", "anchor": { "offset": { "from": "gz0.top", "px": 0 } } },
+                        { "id": "g4", "axis": "horizontal", "anchor": { "offset": { "from": "gz0.bottom", "px": 0 } } } ],
+            "zones": [ { "left": "area.left", "right": "g1", "top": "area.top", "bottom": "area.bottom" },
+                       { "left": "g1", "right": "g2", "top": "area.top", "bottom": "g3" },
+                       { "left": "g1", "right": "g2", "top": "g3", "bottom": "gz0.top" },
+                       { "left": "g1", "right": "gz0.left", "top": "gz0.top", "bottom": "gz0.bottom" },
+                       { "left": "gz0.right", "right": "g2", "top": "gz0.top", "bottom": "gz0.bottom" },
+                       { "left": "g1", "right": "g2", "top": "gz0.bottom", "bottom": "g4" },
+                       { "left": "g1", "right": "g2", "top": "g4", "bottom": "area.bottom" },
+                       { "left": "g2", "right": "area.right", "top": "area.top", "bottom": "area.bottom" } ] }"#;
+        let mut l: Layout = serde_json::from_str(json).unwrap();
+        let count = |l: &Layout| rects(l)[..l.zones.len()].iter().filter(|r| !r.is_empty()).count();
+        assert_eq!((count(&l), gaming(&l)), (4, Rect::new(1363, 533, 4508, 2059)));
+        for (guide, to) in [("g3", 300), ("g3", 900), ("g4", 2300), ("g4", 1800), ("g1", 1000), ("g2", 4800)] {
+            move_divider(&mut l, guide, to, &[], WORK, MONITOR).unwrap();
+            assert_eq!(count(&l), 4, "dragging {guide} to {to} opened a zone");
+            assert_eq!((gaming(&l).width(), gaming(&l).height()), (3145, 1526), "{guide} to {to}");
+        }
+        // Last moved by its right border (g2) to 4800.
+        assert_eq!(gaming(&l), Rect::new(1655, 274, 4800, 1800));
     }
 
     #[test]
@@ -1485,9 +1534,9 @@ mod tests {
         let mut l = three_columns();
         make_gaming_zone(&mut l, 0, WORK, MONITOR).unwrap();
         assert!(!follows_gaming(&l, "g2"));
-        move_divider(&mut l, "g1", 2500, &[], WORK, MONITOR).unwrap(); // a leftover strip opens
+        move_divider(&mut l, "g1", 2500, &[], WORK, MONITOR).unwrap(); // moves the gaming zone
         assert_eq!(l.guide_positions(WORK, MONITOR).unwrap()["g2"].1, 4000);
-        assert_eq!(gaming(&l), Rect::new(0, 0, 2000, 2500));
+        assert_eq!(gaming(&l), Rect::new(500, 0, 2500, 2500));
     }
 
     #[test]
