@@ -505,9 +505,8 @@ fn tapping_shift_switches_the_split_direction() {
     h.event(Event::ModifiersChanged(Modifiers::NONE));
     h.run_steps(2);
     assert!(h.state().split_rows);
-    // The top bar's button switches it back.
-    h.get_by_label("Split direction").click();
-    h.run_steps(2);
+    // Another tap switches it back.
+    tap_shift(&mut h);
     assert!(!h.state().split_rows);
 }
 

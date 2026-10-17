@@ -730,20 +730,6 @@ impl Editor {
             {
                 self.preview_on = !self.preview_on;
             }
-            let (split, tip) = if self.split_rows {
-                (
-                    "Split: top and bottom",
-                    "Clicking a zone splits it into top and bottom. Tap Shift or click here to switch.",
-                )
-            } else {
-                ("Split: side by side", "Clicking a zone splits it side by side. Tap Shift or click here to switch.")
-            };
-            if icons::button(ui, Icon::Split(self.split_rows), 26.0, Some(split), "Split direction", false, true)
-                .on_hover_text(tip)
-                .clicked()
-            {
-                self.split_rows = !self.split_rows;
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::button(ui, Icon::Help, 26.0, Some("How to edit"), "How to edit", self.help_open, true)
                     .clicked()
