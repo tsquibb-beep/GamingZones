@@ -47,7 +47,7 @@ impl LayoutsFile {
 
     /// Parses and validates every layout.
     pub fn from_json(json: &str) -> Result<LayoutsFile, LayoutsError> {
-        let file: LayoutsFile = serde_json::from_str(json).map_err(|e| LayoutsError::Config(ConfigError::Json(e)))?;
+        let file: LayoutsFile = serde_json::from_str(crate::config::without_bom(json)).map_err(|e| LayoutsError::Config(ConfigError::Json(e)))?;
         let mut ids = HashSet::new();
         for layout in &file.layouts {
             if !ids.insert(layout.id.as_str()) {
@@ -206,7 +206,7 @@ pub struct Applied {
 
 impl Applied {
     pub fn from_json(json: &str) -> Result<Applied, ConfigError> {
-        serde_json::from_str(json).map_err(ConfigError::Json)
+        serde_json::from_str(crate::config::without_bom(json)).map_err(ConfigError::Json)
     }
 
     pub fn to_json(&self) -> String {

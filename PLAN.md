@@ -133,7 +133,7 @@ Each phase ends with: `cargo build --release`, `cargo test`, `cargo clippy -- -D
 - [x] Sparse shallow clone of PowerToys FancyZones and Borderless Gaming into `reference/` (gitignored). Write `reference/NOTES.md` summarising the relevant FancyZones code paths: drag handling, DWM frame adjustment, window filtering, overlay drawing, layout JSON shape.
 - [x] Core tray app:
   - Single instance (named mutex).
-  - Hidden message window and tray icon. Menu: Reload config, Open editor (disabled until Phase 3), Settings (disabled until Phase 4), Exit.
+  - Hidden message window and tray icon. Menu: Reload config, Open editor (disabled until Phase 3), Settings, Exit.
   - Per-Monitor-V2 manifest.
   - Config dir creation; file logging with a configurable level.
 - [x] Hotkey plumbing (`RegisterHotKey`), with failures logged clearly.
@@ -320,11 +320,11 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
   "On other monitors: keep px / scale" choice. They only matter for layouts used on monitors of different sizes.
 
 ### Phase 4 — Layout selector, shortcuts, settings
-- [ ] Layout selector popup:
+- [x] Layout selector popup:
   - hotkey (default ``Win+Shift+` ``, FancyZones' editor key); preview cards; number keys to choose;
   - applies to the monitor with the foreground window.
-- [ ] Quick-switch hotkeys `Win+Ctrl+Alt+1..9`.
-- [ ] Settings window in `gz-editor.exe --settings`:
+- [x] Quick-switch hotkeys `Win+Ctrl+Alt+1..9`.
+- [x] Settings window in `gz-editor.exe --settings`:
   - all hotkeys, using a capture box with conflict detection (report when `RegisterHotKey` fails);
   - Shift-drag behaviour (require Shift / always show zones);
   - overlay colours and opacity;
@@ -333,7 +333,13 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
   - gaming snap behaviour;
   - run at logon: HKCU Run, or an elevated Scheduled Task;
   - log level.
-- [ ] Settings apply live without restarting the core.
+- [x] Settings apply live without restarting the core.
+
+Notes (2026-10-18): the layout number is the editor's list order (Move up / Move down in the right-click menu; cards show
+1-9). The selector also has a "No zones" card (key 0). The zones flash for 0.6 s after a switch (`flash_on_switch`, on by
+default). Hotkey capture uses a low-level keyboard hook only while a capture box is waiting. The tray answers the settings
+window's reload with the hotkeys it couldn't register. The admin start-up task runs at normal priority (4, not the
+default 7). The editor picks up applied.json changes the tray app makes.
 
 **Done when**
 - Behaviour survives a reboot.

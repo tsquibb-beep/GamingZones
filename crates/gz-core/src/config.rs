@@ -294,7 +294,7 @@ pub enum LoadOutcome {
 
 impl Settings {
     pub fn from_json(json: &str) -> Result<Settings, serde_json::Error> {
-        serde_json::from_str(json)
+        serde_json::from_str(without_bom(json))
     }
 
     pub fn to_json(&self) -> String {
@@ -308,7 +308,7 @@ impl Settings {
             Ok(text) => {
                 let settings = Settings::from_json(&text).map_err(ConfigError::Json)?;
                 let full = settings.to_json();
-                let on_disk: serde_json::Value = serde_json::from_str(&text).map_err(ConfigError::Json)?;
+                let on_disk: serde_json::Value = serde_json::from_str(without_bom(&text)).map_err(ConfigError::Json)?;
                 let complete: serde_json::Value = serde_json::from_str(&full).map_err(ConfigError::Json)?;
                 if has_all_keys(&on_disk, &complete) {
                     return Ok((settings, LoadOutcome::Loaded));
@@ -324,6 +324,12 @@ impl Settings {
             Err(e) => Err(ConfigError::Io(e)),
         }
     }
+}
+
+/// `json` without a leading byte order mark, which some Windows editors (and PowerShell 5's
+/// `Set-Content -Encoding UTF8`) write and serde_json rejects.
+pub(crate) fn without_bom(json: &str) -> &str {
+    json.strip_prefix('\u{feff}').unwrap_or(json)
 }
 
 /// Whether every object key in `complete` also exists in `actual` (recursively).
@@ -440,6 +446,14 @@ mod tests {
     fn bad_hotkey_or_level_is_an_error() {
         assert!(Settings::from_json(r#"{ "hotkeys": { "debug_dump": "Win+Nope" } }"#).is_err());
         assert!(Settings::from_json(r#"{ "log_level": "loud" }"#).is_err());
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_fine() {
+        let s = Settings::from_json("\u{feff}{ \"log_level\": \"warn\" }").unwrap();
+        assert_eq!(s.log_level, LogLevel::Warn);
+        assert!(crate::store::LayoutsFile::from_json(&format!("\u{feff}{}", crate::store::LayoutsFile::defaults().to_json())).is_ok());
+        assert!(crate::store::Applied::from_json("\u{feff}{}").is_ok());
     }
 
     #[test]
