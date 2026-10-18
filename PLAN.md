@@ -308,7 +308,16 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
   clicking it toggles the lock.
 - Properties pane: the layout name and zone count (no rename, no id, no deadzone sentence); "Used on" one monitor per
   line; gaming zone options only while the gaming zone is selected; left-aligned labels; fixed widths for boxes and
-  buttons; "How to edit" collapsed.
+  buttons.
+
+**Follow-ups (2026-10-18, v0.2.2 to 0.2.5):**
+- "Make zone N the gaming zone" is the logo's green; Discard is red.
+- Hovering a "Used on" line shows a red X: that monitor then has no zones (its applied.json entry is `null`).
+- The divider panel's id/axis line and anchor sentence moved into the "Divider" heading's tooltip.
+- "How to edit" is an overlay from a ? button on the top bar: mouse and keyboard tables, keys drawn as pills.
+- Pressing and letting go of Shift switches the split direction (side by side / top and bottom); no top-bar button.
+- Open: whether the divider's "Make it fixed px" / "Make it % of the area" buttons stay, go, or become one clearer
+  "On other monitors: keep px / scale" choice. They only matter for layouts used on monitors of different sizes.
 
 ### Phase 4 — Layout selector, shortcuts, settings
 - [ ] Layout selector popup:
