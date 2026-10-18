@@ -1,5 +1,6 @@
 //! The zone overlay: one window covering a monitor's work area, shown only during a
-//! Shift-drag and destroyed when the drag ends.
+//! Shift-drag (or briefly after a layout switch, or for the editor's preview) and destroyed
+//! when that ends.
 //!
 //! It is a layered window drawn at one constant opacity (`SetLayeredWindowAttributes`), with
 //! a colour key making any area outside the zones fully transparent. It never takes focus
@@ -73,6 +74,14 @@ impl Overlay {
             return;
         }
         match window::show_below(self.hwnd, dragged, self.area) {
+            Ok(()) => self.visible.set(true),
+            Err(e) => log::warn!("Showing the zone overlay failed: {}", e.message()),
+        }
+    }
+
+    /// Shows the overlay above every other window (the flash after a layout switch).
+    pub fn show_on_top(&self) {
+        match window::show_topmost(self.hwnd, self.area) {
             Ok(()) => self.visible.set(true),
             Err(e) => log::warn!("Showing the zone overlay failed: {}", e.message()),
         }

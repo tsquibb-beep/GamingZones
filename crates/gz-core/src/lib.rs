@@ -12,6 +12,6 @@ pub mod ipc;
 pub mod layout;
 pub mod store;
 
-pub use config::{Color, DisabledZones, GamingFit, LogLevel, Settings};
+pub use config::{Color, DisabledZones, GamingFit, HotkeyName, LogLevel, Overlap, Settings};
 pub use geometry::{Insets, Rect};
 pub use hotkey::{Hotkey, Modifiers};

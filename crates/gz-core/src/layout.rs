@@ -453,15 +453,27 @@ fn round(v: f64) -> i64 {
 // (sensitivity radius + overlap test) and `GetCombinedZoneRange`. See THIRD_PARTY_NOTICES.md.
 // ---------------------------------------------------------------------------------------
 
+/// Which zone wins where zones overlap under the cursor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Overlap {
+    #[default]
+    Smallest,
+    Largest,
+    /// The zone whose centre is nearest the cursor.
+    #[serde(alias = "closest_center")]
+    ClosestCentre,
+}
+
 /// Zones (indices) to highlight with the cursor at (`x`, `y`). Disabled zones are ignored.
 ///
 /// - Without edge spanning (`edge_radius` = `None`): the zone under the cursor; where
-///   zones overlap, the smallest.
+///   zones overlap, the one `rule` picks.
 /// - With edge spanning: zones within `edge_radius` px of the cursor are captured too, so
 ///   on a border shared by two zones both are returned. A zone captured only by the radius,
 ///   with nothing actually under the cursor, doesn't count. If the captured zones really
-///   overlap (by more than the radius), the smallest one wins as above.
-pub fn zones_at(zones: &[ResolvedZone], x: i32, y: i32, edge_radius: Option<i32>) -> Vec<usize> {
+///   overlap (by more than the radius), one wins as above.
+pub fn zones_at(zones: &[ResolvedZone], x: i32, y: i32, edge_radius: Option<i32>, rule: Overlap) -> Vec<usize> {
     let radius = edge_radius.unwrap_or(0).max(0);
     let enabled = || zones.iter().enumerate().filter(|(_, z)| !z.disabled);
     let strict: Vec<usize> = enabled().filter(|(_, z)| z.rect.contains(x, y)).map(|(i, _)| i).collect();
@@ -489,9 +501,20 @@ pub fn zones_at(zones: &[ResolvedZone], x: i32, y: i32, edge_radius: Option<i32>
     if !overlap {
         return captured;
     }
-    // Smallest area wins; ties go to the lower zone number.
+    // Ties go to the lower zone number.
     let area = |i: usize| zones[i].rect.width() as i64 * zones[i].rect.height() as i64;
-    captured.into_iter().min_by_key(|&i| (area(i), i)).into_iter().collect()
+    let distance = |i: usize| {
+        let r = &zones[i].rect;
+        // Doubled, so the centre stays a whole number.
+        let (dx, dy) = ((r.left + r.right - 2 * x) as i64, (r.top + r.bottom - 2 * y) as i64);
+        dx * dx + dy * dy
+    };
+    let key = |i: usize| match rule {
+        Overlap::Smallest => area(i),
+        Overlap::Largest => -area(i),
+        Overlap::ClosestCentre => distance(i),
+    };
+    captured.into_iter().min_by_key(|&i| (key(i), i)).into_iter().collect()
 }
 
 /// Ctrl-span: every enabled zone inside the bounding box of `anchor` and `current`
@@ -748,7 +771,7 @@ mod tests {
         assert_eq!((zone_number(&zones, 1), zone_number(&zones, 3), zone_number(&zones, 4)), (None, Some(3), None));
 
         // The gaming zone is a snap target like any other.
-        assert_eq!(zones_at(&zones, 500, 200, None), [4]);
+        assert_eq!(zones_at(&zones, 500, 200, None, Overlap::Smallest), [4]);
         let mut two = zones.clone();
         two.push(ResolvedZone { gaming: true, ..zones[4] });
         assert_eq!(zone_label(&two, 5), "G2");
@@ -800,46 +823,59 @@ mod tests {
 
     #[test]
     fn single_zone_under_cursor() {
-        assert_eq!(zones_at(&grid(), 100, 100, None), [0]);
-        assert_eq!(zones_at(&grid(), 999, 999, None), [3]);
+        assert_eq!(zones_at(&grid(), 100, 100, None, Overlap::Smallest), [0]);
+        assert_eq!(zones_at(&grid(), 999, 999, None, Overlap::Smallest), [3]);
         // Right/bottom edges are exclusive: x = 500 is in the second column.
-        assert_eq!(zones_at(&grid(), 500, 100, None), [1]);
-        assert!(zones_at(&grid(), 1000, 100, None).is_empty());
+        assert_eq!(zones_at(&grid(), 500, 100, None, Overlap::Smallest), [1]);
+        assert!(zones_at(&grid(), 1000, 100, None, Overlap::Smallest).is_empty());
     }
 
     #[test]
     fn edge_spanning() {
         let r = Some(20);
         // Off: near the border still picks one zone.
-        assert_eq!(zones_at(&grid(), 495, 100, None), [0]);
+        assert_eq!(zones_at(&grid(), 495, 100, None, Overlap::Smallest), [0]);
         // On: within 20 px of the shared border picks both.
-        assert_eq!(zones_at(&grid(), 495, 100, r), [0, 1]);
-        assert_eq!(zones_at(&grid(), 510, 100, r), [0, 1]);
+        assert_eq!(zones_at(&grid(), 495, 100, r, Overlap::Smallest), [0, 1]);
+        assert_eq!(zones_at(&grid(), 510, 100, r, Overlap::Smallest), [0, 1]);
         // Far from the border: just one.
-        assert_eq!(zones_at(&grid(), 450, 100, r), [0]);
+        assert_eq!(zones_at(&grid(), 450, 100, r, Overlap::Smallest), [0]);
         // At the centre crossing: all four.
-        assert_eq!(zones_at(&grid(), 500, 500, r), [0, 1, 2, 3]);
+        assert_eq!(zones_at(&grid(), 500, 500, r, Overlap::Smallest), [0, 1, 2, 3]);
         // Outside every zone but within the radius of one: nothing.
-        assert!(zones_at(&grid(), 1010, 100, r).is_empty());
+        assert!(zones_at(&grid(), 1010, 100, r, Overlap::Smallest).is_empty());
     }
 
     #[test]
     fn overlapping_zones_pick_the_smallest() {
         let zones = vec![rz(0, 0, 1000, 1000), rz(200, 200, 400, 400), rz(300, 300, 700, 700)];
-        assert_eq!(zones_at(&zones, 350, 350, None), [1]);
-        assert_eq!(zones_at(&zones, 350, 350, Some(20)), [1]);
-        assert_eq!(zones_at(&zones, 600, 600, None), [2]);
-        assert_eq!(zones_at(&zones, 900, 900, None), [0]);
+        assert_eq!(zones_at(&zones, 350, 350, None, Overlap::Smallest), [1]);
+        assert_eq!(zones_at(&zones, 350, 350, Some(20), Overlap::Smallest), [1]);
+        assert_eq!(zones_at(&zones, 600, 600, None, Overlap::Smallest), [2]);
+        assert_eq!(zones_at(&zones, 900, 900, None, Overlap::Smallest), [0]);
+    }
+
+    #[test]
+    fn other_overlap_rules() {
+        let zones = vec![rz(0, 0, 1000, 1000), rz(200, 200, 400, 400), rz(300, 300, 700, 700)];
+        assert_eq!(zones_at(&zones, 350, 350, None, Overlap::Largest), [0]);
+        assert_eq!(zones_at(&zones, 600, 600, None, Overlap::Largest), [0]);
+        // Centres: 0 at (500,500), 1 at (300,300), 2 at (500,500); 1 and 2 tie at (400,400).
+        assert_eq!(zones_at(&zones, 320, 320, None, Overlap::ClosestCentre), [1]);
+        assert_eq!(zones_at(&zones, 480, 480, None, Overlap::ClosestCentre), [0]);
+        assert_eq!(zones_at(&zones, 650, 650, Some(20), Overlap::ClosestCentre), [0]);
+        // Without overlap the rule doesn't matter.
+        assert_eq!(zones_at(&grid(), 495, 100, Some(20), Overlap::Largest), [0, 1]);
     }
 
     #[test]
     fn disabled_zones_are_never_picked() {
         let mut zones = grid();
         zones[0].disabled = true;
-        assert!(zones_at(&zones, 100, 100, None).is_empty());
+        assert!(zones_at(&zones, 100, 100, None, Overlap::Smallest).is_empty());
         // Over the disabled zone, near zone 2's edge: only captured by the radius, so nothing.
-        assert!(zones_at(&zones, 495, 100, Some(20)).is_empty());
-        assert_eq!(zones_at(&zones, 510, 100, Some(20)), [1]);
+        assert!(zones_at(&zones, 495, 100, Some(20), Overlap::Smallest).is_empty());
+        assert_eq!(zones_at(&zones, 510, 100, Some(20), Overlap::Smallest), [1]);
         assert_eq!(zone_range(&zones, &[2], &[1]), [1, 2, 3]);
     }
 

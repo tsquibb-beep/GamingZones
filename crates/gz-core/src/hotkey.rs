@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// Written as e.g. `"Win+Ctrl+Alt"` when stored on its own (the quick-switch keys).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct Modifiers {
     pub win: bool,
     pub ctrl: bool,
@@ -18,6 +20,11 @@ pub struct Modifiers {
 impl Modifiers {
     pub const fn any(&self) -> bool {
         self.win || self.ctrl || self.alt || self.shift
+    }
+
+    /// These modifiers with `vk`.
+    pub const fn with(self, vk: u16) -> Hotkey {
+        Hotkey { modifiers: self, vk }
     }
 }
 
@@ -36,6 +43,8 @@ pub enum HotkeyError {
     NoKey,
     TwoKeys(String, String),
     NoModifier,
+    /// A key where only modifiers belong (the quick-switch modifiers).
+    UnexpectedKey(String),
 }
 
 impl fmt::Display for HotkeyError {
@@ -46,6 +55,7 @@ impl fmt::Display for HotkeyError {
             Self::NoKey => write!(f, "hotkey has modifiers but no key"),
             Self::TwoKeys(a, b) => write!(f, "hotkey has two keys (\"{a}\" and \"{b}\")"),
             Self::NoModifier => write!(f, "hotkey needs at least one of Win, Ctrl, Alt, Shift"),
+            Self::UnexpectedKey(k) => write!(f, "only Win, Ctrl, Alt and Shift belong here, not \"{k}\""),
         }
     }
 }
@@ -154,13 +164,49 @@ impl FromStr for Hotkey {
 impl fmt::Display for Hotkey {
     /// Canonical order: Win+Ctrl+Alt+Shift+Key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let m = &self.modifiers;
-        for (on, name) in [(m.win, "Win"), (m.ctrl, "Ctrl"), (m.alt, "Alt"), (m.shift, "Shift")] {
-            if on {
-                write!(f, "{name}+")?;
-            }
+        if self.modifiers.any() {
+            write!(f, "{}+", self.modifiers)?;
         }
         f.write_str(&key_name(self.vk))
+    }
+}
+
+impl FromStr for Modifiers {
+    type Err = HotkeyError;
+
+    /// Modifiers only, e.g. `"Win+Ctrl+Alt"`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.trim().is_empty() {
+            return Err(HotkeyError::Empty);
+        }
+        // Parse as a hotkey with a stand-in key, so a real key in `s` is reported as a second key.
+        match format!("{s}+F1").parse::<Hotkey>() {
+            Ok(h) => Ok(h.modifiers),
+            Err(HotkeyError::TwoKeys(key, _)) => Err(HotkeyError::UnexpectedKey(key)),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl fmt::Display for Modifiers {
+    /// Canonical order: Win+Ctrl+Alt+Shift.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names = [(self.win, "Win"), (self.ctrl, "Ctrl"), (self.alt, "Alt"), (self.shift, "Shift")];
+        let on: Vec<&str> = names.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect();
+        f.write_str(&on.join("+"))
+    }
+}
+
+impl TryFrom<String> for Modifiers {
+    type Error = HotkeyError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<Modifiers> for String {
+    fn from(m: Modifiers) -> String {
+        m.to_string()
     }
 }
 
@@ -222,6 +268,18 @@ mod tests {
         assert_eq!("Win+Banana".parse::<Hotkey>(), Err(HotkeyError::UnknownKey("Banana".into())));
         assert_eq!("Win+A+B".parse::<Hotkey>(), Err(HotkeyError::TwoKeys("A".into(), "B".into())));
         assert!("Ctrl+F25".parse::<Hotkey>().is_err());
+    }
+
+    #[test]
+    fn modifiers_on_their_own() {
+        let m: Modifiers = " ctrl+WIN + alt".parse().unwrap();
+        assert_eq!(m, Modifiers { win: true, ctrl: true, alt: true, shift: false });
+        assert_eq!(m.to_string(), "Win+Ctrl+Alt");
+        assert_eq!(m.with(0x31).to_string(), "Win+Ctrl+Alt+1");
+        assert_eq!("".parse::<Modifiers>(), Err(HotkeyError::Empty));
+        assert_eq!("Win+A".parse::<Modifiers>(), Err(HotkeyError::UnexpectedKey("A".into())));
+        assert_eq!("Win+Banana".parse::<Modifiers>(), Err(HotkeyError::UnknownKey("Banana".into())));
+        assert_eq!(serde_json::to_string(&m).unwrap(), "\"Win+Ctrl+Alt\"");
     }
 
     #[test]

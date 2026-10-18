@@ -8,17 +8,19 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use gz_core::config::{HotkeyName, DIGIT_KEYS};
 use gz_core::config::{LoadOutcome, SETTINGS_FILE};
 use gz_core::ipc::{self, MAIN_WINDOW_CLASS, RELOAD_MESSAGE};
 use gz_core::{Hotkey, Settings};
 use gz_win::keyhook::KeyboardHook;
-use gz_win::monitor::{self, MonitorIds};
+use gz_win::monitor::{self, MonitorIds, MonitorInfo};
 use gz_win::tray::{self, MenuItem, TrayIcon};
 use gz_win::window::{self, msg, Background, Message, WindowHandler, WindowSpec};
 use gz_win::winevent::{self, event, Delivery, Filter, WinEventHook};
 use gz_win::{hotkey, input, inspect, ipc as win_ipc, process, styles::ws, Hwnd};
 
 use crate::drag::{Drag, DragMessages, DropTarget};
+use crate::overlay::Overlay;
 use crate::preview::Preview;
 use crate::snap::Picked;
 use crate::zones::{MonitorZones, ZoneConfig};
@@ -47,6 +49,13 @@ const CMD_EXIT: u32 = 4;
 /// Hotkey ids (`WM_HOTKEY` wParam).
 const HOTKEY_DEBUG_DUMP: i32 = 1;
 const HOTKEY_GAMING_SNAP: i32 = 2;
+const HOTKEY_LAYOUT_SELECTOR: i32 = 3;
+/// Quick-switch: this + 1..9 for layouts 1..9.
+const HOTKEY_QUICK_SWITCH: i32 = 10;
+
+/// `WM_TIMER` id: the end of the zone flash after a layout switch.
+const TIMER_FLASH: usize = 1;
+const FLASH_MS: u32 = 600;
 
 pub struct App {
     config_dir: PathBuf,
@@ -63,6 +72,8 @@ pub struct App {
     warned: HashSet<Hwnd>,
     /// The editor's "Preview on screen".
     preview: Option<Preview>,
+    /// The new layout's zones, shown briefly after a switch.
+    flash: Option<Overlay>,
 }
 
 /// Creates the hidden window; the app lives in its handler until the window is destroyed.
@@ -80,6 +91,7 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
         drag: None,
         warned: HashSet::new(),
         preview: None,
+        flash: None,
     };
     // A hidden top-level window rather than a message-only one: only top-level windows get
     // the TaskbarCreated and WM_DISPLAYCHANGE broadcasts.
@@ -108,7 +120,7 @@ impl App {
             Ok(tray) => self.tray = Some(tray),
             Err(e) => log::error!("Could not add the tray icon: {}", e.message()),
         }
-        self.reload(hwnd);
+        self.reload(hwnd, false);
         // Windows calls this hook only when a window drag/resize starts or ends.
         match WinEventHook::new(
             event::MOVESIZESTART,
@@ -126,8 +138,9 @@ impl App {
     }
 
     /// Re-reads settings.json, layouts.json and applied.json. A file with an error keeps
-    /// its previous contents.
-    fn reload(&mut self, hwnd: Hwnd) {
+    /// its previous contents. Returns the hotkey settings that couldn't be registered
+    /// ([`HotkeyName::bit`]s); with `quiet` they aren't shown as a notification.
+    fn reload(&mut self, hwnd: Hwnd, quiet: bool) -> u32 {
         let path = self.config_dir.join(SETTINGS_FILE);
         match Settings::load_or_create(&path) {
             Ok((settings, outcome)) => {
@@ -149,47 +162,58 @@ impl App {
                 );
             }
         }
-        self.register_hotkeys(hwnd);
+        let failed = self.register_hotkeys(hwnd, quiet);
         let errors = self.zones.reload(&self.config_dir, self.settings.snapping.deadzone_px);
         if !errors.is_empty() {
             self.notify("Layout files have an error", &format!("{}\nDetails are in the log.", errors.join("\n")));
         }
+        failed
     }
 
-    fn register_hotkeys(&mut self, hwnd: Hwnd) {
+    fn register_hotkeys(&mut self, hwnd: Hwnd, quiet: bool) -> u32 {
         for id in self.registered.drain(..) {
             if let Err(e) = hotkey::unregister(hwnd, id) {
                 log::warn!("Unregistering hotkey {id} failed: {}", e.message());
             }
         }
         let keys = &self.settings.hotkeys;
-        let wanted: [(i32, &str, Option<Hotkey>); 2] =
-            [(HOTKEY_DEBUG_DUMP, "debug_dump", keys.debug_dump), (HOTKEY_GAMING_SNAP, "gaming_snap", keys.gaming_snap)];
-        let mut failed = Vec::new();
-        for (id, name, hotkey) in wanted {
-            let Some(hotkey) = hotkey else {
-                log::info!("Hotkey {name} is disabled");
-                continue;
+        for name in HotkeyName::ALL {
+            let off = match name {
+                HotkeyName::DebugDump => keys.debug_dump.is_none(),
+                HotkeyName::GamingSnap => keys.gaming_snap.is_none(),
+                HotkeyName::LayoutSelector => keys.layout_selector.is_none(),
+                HotkeyName::QuickSwitch => keys.quick_switch.is_none(),
             };
+            if off {
+                log::info!("Hotkey {} is disabled", name.key());
+            }
+        }
+        let mut failed_mask = 0;
+        let mut failed = Vec::new();
+        for (name, hotkey) in keys.bindings() {
+            let id = hotkey_id(name, &hotkey);
             match hotkey::register(hwnd, id, &hotkey) {
                 Ok(()) => {
-                    log::info!("Hotkey {name} = {hotkey}");
+                    log::info!("Hotkey {} = {hotkey}", name.key());
                     self.registered.push(id);
                 }
                 Err(e) => {
                     log::warn!(
-                        "Hotkey {name} = {hotkey} could not be registered: {} ({:#010X}). \
-                         Another app or Windows already uses it; change it in {SETTINGS_FILE}.",
+                        "Hotkey {} = {hotkey} could not be registered: {} ({:#010X}). \
+                         Another app or Windows already uses it.",
+                        name.key(),
                         e.message(),
                         e.code().0
                     );
-                    failed.push(format!("{hotkey} ({name})"));
+                    failed_mask |= name.bit();
+                    failed.push(hotkey.to_string());
                 }
             }
         }
-        if !failed.is_empty() {
-            self.notify("Hotkey already in use", &format!("{}\nChange it in {SETTINGS_FILE}.", failed.join("\n")));
+        if !failed.is_empty() && !quiet {
+            self.notify("Hotkey already in use", &format!("{}\nChange it in Settings.", failed.join("\n")));
         }
+        failed_mask
     }
 
     fn notify(&self, title: &str, text: &str) {
@@ -211,7 +235,7 @@ impl App {
         match tray::show_menu(hwnd, &items) {
             Some(CMD_RELOAD) => {
                 log::info!("Reload requested from the tray menu");
-                self.reload(hwnd);
+                self.reload(hwnd, false);
             }
             Some(CMD_EDITOR) => self.open_editor(),
             Some(CMD_EXIT) => {
@@ -306,10 +330,11 @@ impl App {
             }
             return;
         }
+        self.flash = None;
         if let Some(p) = &mut self.preview {
             p.suspend();
         }
-        let drag = Drag::start(hwnd, window, target.exe, &DRAG_MESSAGES);
+        let drag = Drag::start(hwnd, window, target.exe, self.settings.snapping.require_shift, &DRAG_MESSAGES);
         log::debug!(
             "Drag of {} ({window}) started; hooks: {} WinEvent, keyboard {}",
             drag.exe,
@@ -422,8 +447,56 @@ impl App {
         }
     }
 
+    /// Quick-switch: layout `index` (0-based, list order) on the monitor with the foreground window.
+    fn quick_switch(&mut self, index: usize, hwnd: Hwnd) {
+        let Some(layout) = self.zones.layouts().get(index) else {
+            log::info!("Quick-switch: there is no layout {} ({} layouts)", index + 1, self.zones.layouts().len());
+            return;
+        };
+        let id = layout.id.clone();
+        if let Some(m) = target_monitor() {
+            self.switch_layout(hwnd, &m, Some(&id));
+        }
+    }
+
+    /// Puts `m` on `layout` (`None` = no zones), then flashes its zones. Windows don't move.
+    fn switch_layout(&mut self, hwnd: Hwnd, m: &MonitorInfo, layout: Option<&str>) {
+        let ids = MonitorIds::query();
+        if self.zones.layout_id(m, &ids) == layout {
+            log::info!("{} already uses layout {}", m.device, layout.unwrap_or("(none)"));
+        } else if let Err(e) = self.zones.set_layout(&self.config_dir, m, &ids, layout) {
+            log::error!("Could not switch {} to layout {}: {e}", m.device, layout.unwrap_or("(none)"));
+            self.notify("Couldn't switch layout", &e);
+            return;
+        } else {
+            log::info!("{} now uses layout {}", m.device, layout.unwrap_or("(none)"));
+        }
+        self.flash_zones(hwnd, m, &ids);
+    }
+
+    /// Shows `m`'s zones on top of everything for [`FLASH_MS`] (if `flash_on_switch` is on).
+    fn flash_zones(&mut self, hwnd: Hwnd, m: &MonitorInfo, ids: &MonitorIds) {
+        self.flash = None;
+        if !self.settings.overlay.flash_on_switch || self.drag.is_some() {
+            return;
+        }
+        let Some(mz) = self.zones.for_monitor(m, ids, self.settings.snapping.deadzone_px) else { return };
+        match Overlay::create(mz.overlay_area(), mz.zones, mz.dpi, &self.settings.overlay) {
+            Ok(o) => {
+                o.show_on_top();
+                self.flash = Some(o);
+                if let Err(e) = window::set_timer(hwnd, TIMER_FLASH, FLASH_MS) {
+                    log::warn!("Could not time the zone flash: {}", e.message());
+                    self.flash = None;
+                }
+            }
+            Err(e) => log::warn!("Could not create the zone overlay: {}", e.message()),
+        }
+    }
+
     fn on_destroy(&mut self, hwnd: Hwnd) {
         self.drag = None;
+        self.flash = None;
         self.preview = None;
         self.movesize_hook = None;
         for id in self.registered.drain(..) {
@@ -447,8 +520,16 @@ impl WindowHandler for App {
             msg::HOTKEY => match m.wparam as i32 {
                 HOTKEY_DEBUG_DUMP => dump::log_foreground_window(),
                 HOTKEY_GAMING_SNAP => self.snap_to_gaming_zone(),
+                HOTKEY_LAYOUT_SELECTOR => log::info!("Layout selector: not built yet"),
+                id if (HOTKEY_QUICK_SWITCH + 1..=HOTKEY_QUICK_SWITCH + 9).contains(&id) => {
+                    self.quick_switch((id - HOTKEY_QUICK_SWITCH - 1) as usize, hwnd)
+                }
                 _ => {}
             },
+            msg::TIMER if m.wparam == TIMER_FLASH => {
+                window::kill_timer(hwnd, TIMER_FLASH);
+                self.flash = None;
+            }
             WM_MOVESIZE => self.on_move_size(hwnd, m),
             WM_DRAG_LOCATION => {
                 if let Some(drag) = &self.drag {
@@ -488,7 +569,8 @@ impl WindowHandler for App {
             msg::DESTROY => self.on_destroy(hwnd),
             other if other != 0 && other == self.reload_msg => {
                 log::info!("Reload requested by {RELOAD_MESSAGE}");
-                self.reload(hwnd);
+                let failed = self.reload(hwnd, m.wparam == ipc::RELOAD_QUIET);
+                return Some(ipc::RELOAD_DONE | failed as isize);
             }
             other if other != 0 && other == self.taskbar_created_msg => {
                 log::info!("Taskbar re-created; adding the tray icon again");
@@ -502,4 +584,24 @@ impl WindowHandler for App {
         }
         Some(0)
     }
+}
+
+fn hotkey_id(name: HotkeyName, hotkey: &Hotkey) -> i32 {
+    match name {
+        HotkeyName::DebugDump => HOTKEY_DEBUG_DUMP,
+        HotkeyName::GamingSnap => HOTKEY_GAMING_SNAP,
+        HotkeyName::LayoutSelector => HOTKEY_LAYOUT_SELECTOR,
+        HotkeyName::QuickSwitch => HOTKEY_QUICK_SWITCH + (hotkey.vk - DIGIT_KEYS.start() + 1) as i32,
+    }
+}
+
+/// The monitor a layout hotkey acts on: the foreground window's, or the cursor's when the
+/// desktop (or nothing) has the focus.
+fn target_monitor() -> Option<MonitorInfo> {
+    let window = inspect::foreground_window()
+        .filter(|&w| inspect::is_visible(w) && !matches!(inspect::class_name(w).as_str(), "Progman" | "WorkerW"));
+    window.and_then(monitor::for_window).or_else(|| {
+        let (x, y) = input::cursor_pos()?;
+        monitor::from_point(x, y)
+    })
 }

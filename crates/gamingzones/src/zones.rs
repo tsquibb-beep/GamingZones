@@ -129,6 +129,34 @@ impl ZoneConfig {
         }
     }
 
+    /// The layouts, in the editor's list order (quick-switch numbers).
+    pub fn layouts(&self) -> &[Layout] {
+        self.layouts.as_ref().map_or(&[], |l| &l.layouts)
+    }
+
+    /// The id of the layout `m` uses (`None` = no zones).
+    pub fn layout_id(&self, m: &MonitorInfo, ids: &MonitorIds) -> Option<&str> {
+        self.applied.layout_for(&ids.id(m).id)
+    }
+
+    /// Puts `m` on `layout` (`None` = no zones) and writes applied.json. Nothing changes if
+    /// the file can't be written.
+    pub fn set_layout(
+        &mut self,
+        dir: &Path,
+        m: &MonitorInfo,
+        ids: &MonitorIds,
+        layout: Option<&str>,
+    ) -> Result<(), String> {
+        let id = ids.id(m);
+        let mut applied = self.applied.clone();
+        applied.monitors.insert(id.id, MonitorEntry { layout: layout.map(str::to_string), name: id.name });
+        let path = dir.join(APPLIED_FILE);
+        applied.save(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.applied = applied;
+        Ok(())
+    }
+
     fn layout_for(&self, m: &MonitorInfo, ids: &MonitorIds) -> Option<&Layout> {
         let layouts = self.layouts.as_ref()?;
         layouts.get(self.applied.layout_for(&ids.id(m).id)?)

@@ -1,7 +1,8 @@
 //! `settings.json`. Unknown fields are ignored and missing fields take their defaults,
 //! so older and newer files both load.
 
-use crate::hotkey::Hotkey;
+use crate::hotkey::{Hotkey, Modifiers};
+pub use crate::layout::Overlap;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
@@ -32,6 +33,11 @@ pub struct Settings {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Snapping {
+    /// `true`: zones show while Shift is held during a drag. `false`: zones show on every
+    /// drag, and holding Shift hides them.
+    pub require_shift: bool,
+    /// Which zone wins where zones overlap.
+    pub overlap: Overlap,
     /// Dropping within `edge_span_radius_px` of a border shared by two zones snaps to both.
     pub edge_span: bool,
     pub edge_span_radius_px: i32,
@@ -47,6 +53,8 @@ pub struct Snapping {
 impl Default for Snapping {
     fn default() -> Self {
         Self {
+            require_shift: true,
+            overlap: Overlap::Smallest,
             edge_span: false,
             edge_span_radius_px: 20,
             excluded_apps: Vec::new(),
@@ -92,6 +100,8 @@ pub struct Overlay {
     /// Zones below `snapping.deadzone_px`: drawn in `disabled_color`, or not drawn at all.
     pub disabled_zones: DisabledZones,
     pub disabled_color: Color,
+    /// Show the new layout's zones briefly when a hotkey or the layout selector changes it.
+    pub flash_on_switch: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +123,7 @@ impl Default for Overlay {
             opacity: 50,
             disabled_zones: DisabledZones::Greyed,
             disabled_color: Color::rgb(0x80, 0x80, 0x80),
+            flash_on_switch: true,
         }
     }
 }
@@ -166,11 +177,85 @@ pub struct Hotkeys {
     /// Snaps the foreground window to the gaming zone (no drag needed, so it works for
     /// borderless and fixed-size game windows).
     pub gaming_snap: Option<Hotkey>,
+    /// Opens the layout selector on the monitor with the foreground window.
+    pub layout_selector: Option<Hotkey>,
+    /// These modifiers with 1..9 apply layout 1..9 (the editor's list order) to the
+    /// monitor with the foreground window.
+    pub quick_switch: Option<Modifiers>,
 }
 
 impl Default for Hotkeys {
     fn default() -> Self {
-        Self { debug_dump: Some(builtin("Win+Ctrl+Alt+I")), gaming_snap: Some(builtin("Win+Ctrl+Alt+G")) }
+        Self {
+            debug_dump: Some(builtin("Win+Ctrl+Alt+I")),
+            gaming_snap: Some(builtin("Win+Ctrl+Alt+G")),
+            layout_selector: Some(builtin("Win+Shift+`")),
+            quick_switch: Some(Modifiers { win: true, ctrl: true, alt: true, shift: false }),
+        }
+    }
+}
+
+/// One of the hotkey settings. The order is fixed: [`HotkeyName::bit`] is used in the
+/// tray app's reply to the settings window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HotkeyName {
+    DebugDump,
+    GamingSnap,
+    LayoutSelector,
+    QuickSwitch,
+}
+
+impl HotkeyName {
+    pub const ALL: [HotkeyName; 4] = [Self::DebugDump, Self::GamingSnap, Self::LayoutSelector, Self::QuickSwitch];
+
+    /// The key in settings.json.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::DebugDump => "debug_dump",
+            Self::GamingSnap => "gaming_snap",
+            Self::LayoutSelector => "layout_selector",
+            Self::QuickSwitch => "quick_switch",
+        }
+    }
+
+    pub const fn bit(self) -> u32 {
+        1 << self as u32
+    }
+}
+
+/// VK codes of the digits 1..9.
+pub const DIGIT_KEYS: std::ops::RangeInclusive<u16> = 0x31..=0x39;
+
+impl Hotkeys {
+    /// Every hotkey to register, in a fixed order. Quick-switch gives nine (layouts 1..9).
+    pub fn bindings(&self) -> Vec<(HotkeyName, Hotkey)> {
+        let mut out = Vec::new();
+        let single = [
+            (HotkeyName::DebugDump, self.debug_dump),
+            (HotkeyName::GamingSnap, self.gaming_snap),
+            (HotkeyName::LayoutSelector, self.layout_selector),
+        ];
+        for (name, hotkey) in single {
+            out.extend(hotkey.map(|h| (name, h)));
+        }
+        if let Some(m) = self.quick_switch {
+            out.extend(DIGIT_KEYS.map(|vk| (HotkeyName::QuickSwitch, m.with(vk))));
+        }
+        out
+    }
+
+    /// Settings that share a key combination with an earlier one (each listed once).
+    pub fn clashes(&self) -> Vec<(HotkeyName, HotkeyName)> {
+        let all = self.bindings();
+        let mut out = Vec::new();
+        for (n, (name, hotkey)) in all.iter().enumerate() {
+            if let Some((first, _)) = all[..n].iter().find(|(other, h)| other != name && h == hotkey) {
+                if !out.contains(&(*first, *name)) {
+                    out.push((*first, *name));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -261,6 +346,49 @@ mod tests {
         assert_eq!(Settings::from_json(&s.to_json()).unwrap(), s);
         assert_eq!(s.hotkeys.debug_dump.unwrap().to_string(), "Win+Ctrl+Alt+I");
         assert_eq!(s.hotkeys.gaming_snap.unwrap().to_string(), "Win+Ctrl+Alt+G");
+        assert_eq!(s.hotkeys.layout_selector.unwrap().to_string(), "Win+Shift+`");
+        assert_eq!(s.hotkeys.quick_switch.unwrap().to_string(), "Win+Ctrl+Alt");
+        assert!(s.snapping.require_shift && s.overlay.flash_on_switch);
+        assert_eq!(s.snapping.overlap, Overlap::Smallest);
+        assert!(s.hotkeys.clashes().is_empty());
+    }
+
+    #[test]
+    fn phase_4_settings() {
+        let s = Settings::from_json(
+            r#"{ "hotkeys": { "quick_switch": "Ctrl+Alt", "layout_selector": null },
+                 "snapping": { "require_shift": false, "overlap": "closest_center" },
+                 "overlay": { "flash_on_switch": false } }"#,
+        )
+        .unwrap();
+        assert_eq!(s.hotkeys.quick_switch.unwrap().to_string(), "Ctrl+Alt");
+        assert_eq!(s.hotkeys.layout_selector, None);
+        assert!(!s.snapping.require_shift && !s.overlay.flash_on_switch);
+        assert_eq!(s.snapping.overlap, Overlap::ClosestCentre);
+        assert!(s.to_json().contains(r#""overlap": "closest_centre""#));
+        assert!(Settings::from_json(r#"{ "hotkeys": { "quick_switch": "Ctrl+Alt+1" } }"#).is_err());
+        assert!(Settings::from_json(r#"{ "snapping": { "overlap": "random" } }"#).is_err());
+    }
+
+    #[test]
+    fn hotkey_bindings_and_clashes() {
+        let mut h = Hotkeys::default();
+        let all = h.bindings();
+        assert_eq!(all.len(), 12);
+        assert_eq!(all[3], (HotkeyName::QuickSwitch, "Win+Ctrl+Alt+1".parse().unwrap()));
+        assert_eq!(all[11].1.to_string(), "Win+Ctrl+Alt+9");
+
+        h.gaming_snap = Some("Win+Ctrl+Alt+5".parse().unwrap());
+        assert_eq!(h.clashes(), [(HotkeyName::GamingSnap, HotkeyName::QuickSwitch)]);
+        h.debug_dump = h.gaming_snap;
+        assert_eq!(
+            h.clashes(),
+            [(HotkeyName::DebugDump, HotkeyName::GamingSnap), (HotkeyName::DebugDump, HotkeyName::QuickSwitch)]
+        );
+        h.quick_switch = None;
+        assert_eq!(h.bindings().len(), 3);
+        assert_eq!(h.clashes(), [(HotkeyName::DebugDump, HotkeyName::GamingSnap)]);
+        assert_eq!(HotkeyName::ALL.map(HotkeyName::bit), [1, 2, 4, 8]);
     }
 
     #[test]

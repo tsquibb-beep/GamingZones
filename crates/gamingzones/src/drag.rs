@@ -44,6 +44,8 @@ pub struct Drag {
     lctrl: bool,
     rctrl: bool,
     cancelled: bool,
+    /// `snapping.require_shift` when the drag started.
+    require_shift: bool,
     /// Queried when first needed (Shift pressed), not for every drag.
     ids: Option<MonitorIds>,
     /// Device of the monitor the cursor was last on (`None` = not on any).
@@ -57,7 +59,7 @@ pub struct Drag {
 }
 
 impl Drag {
-    pub fn start(main: Hwnd, window: Hwnd, exe: String, msgs: &DragMessages) -> Drag {
+    pub fn start(main: Hwnd, window: Hwnd, exe: String, require_shift: bool, msgs: &DragMessages) -> Drag {
         let location_hook = WinEventHook::new(
             event::OBJECT_LOCATIONCHANGE,
             event::OBJECT_LOCATIONCHANGE,
@@ -91,6 +93,7 @@ impl Drag {
             lctrl: input::key_down(vk::LCONTROL),
             rctrl: input::key_down(vk::RCONTROL),
             cancelled: false,
+            require_shift,
             ids: None,
             monitor_device: None,
             monitor: None,
@@ -102,6 +105,11 @@ impl Drag {
 
     pub fn shift(&self) -> bool {
         self.lshift || self.rshift
+    }
+
+    /// Whether zones show: Shift held, or (with `require_shift` off) Shift not held.
+    fn zones_on(&self) -> bool {
+        self.shift() == self.require_shift
     }
 
     fn ctrl(&self) -> bool {
@@ -143,7 +151,7 @@ impl Drag {
             self.lctrl = input::key_down(vk::LCONTROL);
             self.rctrl = input::key_down(vk::RCONTROL);
         }
-        if !self.shift() {
+        if !self.zones_on() {
             self.clear();
             return;
         }
@@ -164,7 +172,7 @@ impl Drag {
         }
         let Some(mz) = &self.monitor else { return };
 
-        let current = zones_at(&mz.zones, x, y, settings.snapping.edge_radius());
+        let current = zones_at(&mz.zones, x, y, settings.snapping.edge_radius(), settings.snapping.overlap);
         let selected = if self.ctrl() {
             if self.anchor.is_empty() {
                 self.anchor = current.clone();
@@ -193,7 +201,7 @@ impl Drag {
         self.selected = selected;
     }
 
-    /// Hides the overlay and forgets the selection (Shift released, Esc).
+    /// Hides the overlay and forgets the selection (Shift changed, Esc).
     fn clear(&mut self) {
         if let Some(o) = &self.overlay {
             o.hide();
@@ -206,7 +214,7 @@ impl Drag {
     /// Hooks and overlay are removed (by dropping `self`) before the caller moves any
     /// window, so a slow app can't hold up keyboard input through our keyboard hook.
     pub fn finish(self) -> Option<DropTarget> {
-        if self.cancelled || !self.shift() || self.selected.is_empty() {
+        if self.cancelled || !self.zones_on() || self.selected.is_empty() {
             return None;
         }
         let mz = self.monitor.as_ref()?;

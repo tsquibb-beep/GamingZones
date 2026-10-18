@@ -84,6 +84,13 @@ pub mod msg {
     pub const NCHITTEST: u32 = wm::WM_NCHITTEST;
     pub const MOUSEACTIVATE: u32 = wm::WM_MOUSEACTIVATE;
     pub const COPYDATA: u32 = wm::WM_COPYDATA;
+    pub const TIMER: u32 = wm::WM_TIMER;
+    pub const KEYDOWN: u32 = wm::WM_KEYDOWN;
+    pub const SYSKEYDOWN: u32 = wm::WM_SYSKEYDOWN;
+    pub const LBUTTONDOWN: u32 = wm::WM_LBUTTONDOWN;
+    pub const MOUSEMOVE: u32 = wm::WM_MOUSEMOVE;
+    pub const ACTIVATE: u32 = wm::WM_ACTIVATE;
+    pub const GETDLGCODE: u32 = wm::WM_GETDLGCODE;
     /// `WM_NCHITTEST` result: let clicks fall through to the window below.
     pub const HTTRANSPARENT: isize = wm::HTTRANSPARENT as isize;
     /// `WM_MOUSEACTIVATE` result: don't activate.
@@ -347,6 +354,36 @@ pub fn show_below(hwnd: Hwnd, above: Hwnd, rect: Rect) -> crate::Result<()> {
             rect.height(),
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )
+    }
+}
+
+/// Shows `hwnd` above every non-topmost window, at `rect`, without activating it.
+pub fn show_topmost(hwnd: Hwnd, rect: Rect) -> crate::Result<()> {
+    unsafe {
+        SetWindowPos(
+            hwnd.raw(),
+            Some(HWND_TOPMOST),
+            rect.left,
+            rect.top,
+            rect.width(),
+            rect.height(),
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+    }
+}
+
+/// A one-off or repeating `WM_TIMER` (wParam = `id`) to `hwnd` every `ms` milliseconds,
+/// until [`kill_timer`]. Setting the same id again restarts it.
+pub fn set_timer(hwnd: Hwnd, id: usize, ms: u32) -> crate::Result<()> {
+    match unsafe { SetTimer(Some(hwnd.raw()), id, ms, None) } {
+        0 => Err(crate::Error::from_thread()),
+        _ => Ok(()),
+    }
+}
+
+pub fn kill_timer(hwnd: Hwnd, id: usize) {
+    unsafe {
+        let _ = KillTimer(Some(hwnd.raw()), id);
     }
 }
 
