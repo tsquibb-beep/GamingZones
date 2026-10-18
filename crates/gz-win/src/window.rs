@@ -387,6 +387,20 @@ pub fn kill_timer(hwnd: Hwnd, id: usize) {
     }
 }
 
+/// Asks Windows 11 to round the corners of a popup window (ignored on Windows 10).
+pub fn round_corners(hwnd: Hwnd) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
+    let value = DWMWCP_ROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd.raw(),
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &value as *const _ as *const c_void,
+            size_of_val(&value) as u32,
+        );
+    }
+}
+
 /// Brings a window to the front (restoring it if minimised).
 pub fn activate(hwnd: Hwnd) {
     unsafe {

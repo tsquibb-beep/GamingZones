@@ -1,11 +1,13 @@
-//! GDI painting for the zone overlay: filled rectangles, borders and centred text.
+//! GDI painting for the zone overlay and the layout selector: filled rectangles, borders
+//! and text.
 
 use gz_core::{Color, Rect};
 use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, DrawTextW, EndPaint, ExcludeClipRect, FillRect, GetStockObject, SelectClipRgn, SelectObject, SetBkMode,
-    SetDCBrushColor, SetTextColor, DC_BRUSH, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC,
-    PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    ExcludeClipRect, FillRect, GetStockObject, SelectClipRgn, SelectObject, SetBkMode, SetDCBrushColor, SetTextColor,
+    DC_BRUSH, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
+    HBRUSH, HDC, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 
 use crate::controls::Font;
@@ -31,6 +33,30 @@ pub fn paint(hwnd: Hwnd, f: impl FnOnce(&mut Painter)) {
     unsafe {
         let _ = EndPaint(hwnd.raw(), &ps);
     }
+}
+
+/// Like [`paint`], but `f` draws into an off-screen bitmap of `width` × `height` that is
+/// then copied to the window in one go, so redrawing doesn't flicker.
+pub fn paint_buffered(hwnd: Hwnd, width: i32, height: i32, f: impl FnOnce(&mut Painter)) {
+    paint(hwnd, |p| unsafe {
+        let mem = CreateCompatibleDC(Some(p.hdc));
+        let bitmap = CreateCompatibleBitmap(p.hdc, width, height);
+        if mem.is_invalid() || bitmap.is_invalid() {
+            // Draw straight to the window instead.
+            f(p);
+        } else {
+            let old = SelectObject(mem, bitmap.into());
+            f(&mut Painter { hdc: mem });
+            let _ = BitBlt(p.hdc, 0, 0, width, height, Some(mem), 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+        }
+        if !bitmap.is_invalid() {
+            let _ = DeleteObject(bitmap.into());
+        }
+        if !mem.is_invalid() {
+            let _ = DeleteDC(mem);
+        }
+    });
 }
 
 impl Painter {
@@ -69,13 +95,27 @@ impl Painter {
 
     /// One line of text centred in `rect`.
     pub fn text_centered(&mut self, rect: Rect, text: &str, font: &Font, color: Color) {
+        self.text(rect, text, font, color, DT_CENTER);
+    }
+
+    /// One line of text at the left of `rect`, centred vertically, with "…" if it's too long.
+    pub fn text_left(&mut self, rect: Rect, text: &str, font: &Font, color: Color) {
+        self.text(rect, text, font, color, DT_LEFT | DT_END_ELLIPSIS);
+    }
+
+    /// One line of text at the right of `rect`, centred vertically.
+    pub fn text_right(&mut self, rect: Rect, text: &str, font: &Font, color: Color) {
+        self.text(rect, text, font, color, DT_RIGHT);
+    }
+
+    fn text(&mut self, rect: Rect, text: &str, font: &Font, color: Color, align: DRAW_TEXT_FORMAT) {
         let mut buf: Vec<u16> = text.encode_utf16().collect();
         let mut r = rect_to(rect);
         unsafe {
             let old = SelectObject(self.hdc, font.handle().into());
             SetTextColor(self.hdc, COLORREF(colorref(color)));
             SetBkMode(self.hdc, TRANSPARENT);
-            DrawTextW(self.hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(self.hdc, &mut buf, &mut r, align | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(self.hdc, old);
         }
     }

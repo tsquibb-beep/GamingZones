@@ -11,6 +11,7 @@ mod dump;
 mod logger;
 mod overlay;
 mod preview;
+mod selector;
 mod snap;
 mod zones;
 

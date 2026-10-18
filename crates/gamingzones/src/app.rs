@@ -22,6 +22,7 @@ use gz_win::{hotkey, input, inspect, ipc as win_ipc, process, styles::ws, Hwnd};
 use crate::drag::{Drag, DragMessages, DropTarget};
 use crate::overlay::Overlay;
 use crate::preview::Preview;
+use crate::selector::{self, Selector};
 use crate::snap::Picked;
 use crate::zones::{MonitorZones, ZoneConfig};
 use crate::{dump, logger, snap};
@@ -37,6 +38,8 @@ const WM_DRAG_DESTROY: u32 = msg::APP + 4;
 const WM_DRAG_KEY: u32 = msg::APP + 5;
 /// The editor's window (showing a preview) was destroyed.
 const WM_PREVIEW_CLOSED: u32 = msg::APP + 6;
+/// The layout selector closed: wParam = chosen card or `selector::CANCELLED`.
+const WM_SELECTOR_DONE: u32 = msg::APP + 7;
 
 const DRAG_MESSAGES: DragMessages =
     DragMessages { location: WM_DRAG_LOCATION, destroy: WM_DRAG_DESTROY, key: WM_DRAG_KEY };
@@ -74,6 +77,7 @@ pub struct App {
     preview: Option<Preview>,
     /// The new layout's zones, shown briefly after a switch.
     flash: Option<Overlay>,
+    selector: Option<Selector>,
 }
 
 /// Creates the hidden window; the app lives in its handler until the window is destroyed.
@@ -92,6 +96,7 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
         warned: HashSet::new(),
         preview: None,
         flash: None,
+        selector: None,
     };
     // A hidden top-level window rather than a message-only one: only top-level windows get
     // the TaskbarCreated and WM_DISPLAYCHANGE broadcasts.
@@ -331,6 +336,7 @@ impl App {
             return;
         }
         self.flash = None;
+        self.selector = None;
         if let Some(p) = &mut self.preview {
             p.suspend();
         }
@@ -459,6 +465,46 @@ impl App {
         }
     }
 
+    /// The selector hotkey: opens the selector on the foreground window's monitor, or
+    /// closes it if it's open.
+    fn toggle_selector(&mut self, hwnd: Hwnd) {
+        if self.selector.take().is_some() {
+            log::debug!("Layout selector closed by its hotkey");
+            return;
+        }
+        let previous = inspect::foreground_window();
+        let Some(m) = target_monitor() else { return };
+        let ids = MonitorIds::query();
+        let entries = selector::Entry::all(self.zones.layouts(), &m, self.settings.snapping.deadzone_px);
+        let current = self.zones.layout_id(&m, &ids).map(str::to_string);
+        let current = entries.iter().position(|e| e.layout == current);
+        let name = ids.id(&m).name;
+        let disabled = self.settings.overlay.disabled_zones;
+        match Selector::open(hwnd, WM_SELECTOR_DONE, m, &name, entries, current, disabled, previous) {
+            Ok(s) => {
+                log::debug!("Layout selector open on {}", s.monitor.device);
+                self.flash = None;
+                self.selector = Some(s);
+            }
+            Err(e) => log::error!("Could not open the layout selector: {}", e.message()),
+        }
+    }
+
+    fn selector_done(&mut self, hwnd: Hwnd, choice: usize) {
+        let Some(s) = self.selector.take() else { return };
+        let layout = s.layout_of(choice);
+        let (monitor, previous) = (s.monitor.clone(), s.previous);
+        drop(s);
+        // Give the focus back to the window that had it.
+        if let Some(w) = previous.filter(|&w| inspect::exists(w)) {
+            window::activate(w);
+        }
+        match layout {
+            Some(layout) => self.switch_layout(hwnd, &monitor, layout.as_deref()),
+            None => log::debug!("Layout selector closed without a choice"),
+        }
+    }
+
     /// Puts `m` on `layout` (`None` = no zones), then flashes its zones. Windows don't move.
     fn switch_layout(&mut self, hwnd: Hwnd, m: &MonitorInfo, layout: Option<&str>) {
         let ids = MonitorIds::query();
@@ -497,6 +543,7 @@ impl App {
     fn on_destroy(&mut self, hwnd: Hwnd) {
         self.drag = None;
         self.flash = None;
+        self.selector = None;
         self.preview = None;
         self.movesize_hook = None;
         for id in self.registered.drain(..) {
@@ -520,12 +567,13 @@ impl WindowHandler for App {
             msg::HOTKEY => match m.wparam as i32 {
                 HOTKEY_DEBUG_DUMP => dump::log_foreground_window(),
                 HOTKEY_GAMING_SNAP => self.snap_to_gaming_zone(),
-                HOTKEY_LAYOUT_SELECTOR => log::info!("Layout selector: not built yet"),
+                HOTKEY_LAYOUT_SELECTOR => self.toggle_selector(hwnd),
                 id if (HOTKEY_QUICK_SWITCH + 1..=HOTKEY_QUICK_SWITCH + 9).contains(&id) => {
                     self.quick_switch((id - HOTKEY_QUICK_SWITCH - 1) as usize, hwnd)
                 }
                 _ => {}
             },
+            WM_SELECTOR_DONE => self.selector_done(hwnd, m.wparam),
             msg::TIMER if m.wparam == TIMER_FLASH => {
                 window::kill_timer(hwnd, TIMER_FLASH);
                 self.flash = None;
@@ -605,3 +653,4 @@ fn target_monitor() -> Option<MonitorInfo> {
         monitor::from_point(x, y)
     })
 }
+
