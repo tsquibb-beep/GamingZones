@@ -1,21 +1,24 @@
 //! Low-level keyboard hooks (`WH_KEYBOARD_LL`), never persistent (PLAN §1):
 //! - [`KeyboardHook`], **during a drag only** (tray app). It's created when a drag starts and
 //!   dropped when it ends, and lets Shift/Ctrl/Esc take effect while the mouse is still.
-//! - [`CaptureHook`], **while a hotkey box is capturing** (settings window). It takes every
-//!   key press for itself, so Win+… combinations reach the box instead of Windows or the app
-//!   that owns them.
+//! - [`CaptureHook`], **while a hotkey box is capturing** (settings window), on a thread of
+//!   its own. It takes every key press for itself, so Win+… combinations reach the box
+//!   instead of Windows or the app that owns them.
 //!
 //! While a low-level hook is installed, every key press in the system waits for this
 //! thread to run the callback, so the thread must keep pumping messages and never block.
 //! `KeyboardHook`'s callback only posts a message and always passes keys on.
 
 use std::cell::RefCell;
+use std::sync::{mpsc, Arc, Mutex};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_UP,
-    WH_KEYBOARD_LL,
+    CallNextHookEx, GetMessageW, PeekMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, SetTimer,
+    SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_UP, MSG, PM_NOREMOVE, WH_KEYBOARD_LL,
+    WM_APP, WM_TIMER,
 };
 
 use crate::Hwnd;
@@ -110,53 +113,110 @@ unsafe extern "system" fn callback(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
+/// The capture hook's state, on its own thread.
 struct CaptureState {
     /// Key presses (virtual key, down) not yet taken by [`CaptureHook::take`].
-    events: Vec<(u16, bool)>,
+    events: Arc<Mutex<Vec<(u16, bool)>>>,
+    /// Called after each key press it takes.
+    wake: Box<dyn Fn() + Send>,
     /// Keys that went down while capturing: only their ups are swallowed, so a key held
     /// before the hook existed is still released properly.
     down: Vec<u16>,
+    /// The owner is done: take no new keys, only the rest of the ones in `down`.
+    finishing: bool,
 }
 
 thread_local! {
     static CAPTURE: RefCell<Option<CaptureState>> = const { RefCell::new(None) };
 }
 
-/// Takes all keyboard input while it exists (one per thread); removed on drop. The thread
-/// must keep pumping messages; read the keys with [`CaptureHook::take`].
+/// Posted to the hook's thread when the [`CaptureHook`] is dropped.
+const WM_FINISH: u32 = WM_APP + 1;
+/// How long a finishing hook waits for the keys still held to be released (ms).
+const FINISH_TIMEOUT_MS: u32 = 1000;
+
+/// Takes all keyboard input while it exists, so Win+… combinations reach the hotkey box
+/// instead of Windows or the app that owns them. Read the keys with [`CaptureHook::take`].
+///
+/// The hook runs on a thread of its own that only pumps messages. Windows waits a limited
+/// time for a low-level hook to answer, then passes the key on; on the UI thread a slow
+/// frame could let a Win+D through. Dropping it stops taking keys, but the keys still held
+/// are swallowed until they're released (at most a second), or Windows would see the rest
+/// of the combination.
 pub struct CaptureHook {
-    handle: HHOOK,
+    thread_id: u32,
+    events: Arc<Mutex<Vec<(u16, bool)>>>,
 }
 
 impl CaptureHook {
-    pub fn new() -> crate::Result<Self> {
-        if CAPTURE.with(|s| s.borrow().is_some()) {
-            return Err(crate::Error::new(
-                windows::core::HRESULT(0x8000_000Eu32 as i32),
-                "capture hook already installed",
-            ));
-        }
-        let handle = unsafe {
-            let module = GetModuleHandleW(None)?;
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(capture_callback), Some(module.into()), 0)?
-        };
-        CAPTURE.with(|s| *s.borrow_mut() = Some(CaptureState { events: Vec::new(), down: Vec::new() }));
-        Ok(Self { handle })
+    /// `wake` is called on the hook's thread after each key press (e.g. to repaint).
+    pub fn new(wake: impl Fn() + Send + 'static) -> crate::Result<Self> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ready, started) = mpsc::channel();
+        let state = CaptureState { events: events.clone(), wake: Box::new(wake), down: Vec::new(), finishing: false };
+        std::thread::Builder::new()
+            .name("capture hook".into())
+            .spawn(move || capture_thread(state, ready))
+            .map_err(|e| crate::Error::new(windows::core::HRESULT(0x8000_4005u32 as i32), e.to_string()))?;
+        let thread_id = started.recv().map_err(|_| {
+            crate::Error::new(windows::core::HRESULT(0x8000_4005u32 as i32), "capture hook thread ended")
+        })??;
+        Ok(Self { thread_id, events })
     }
 
     /// The key presses since the last call: (virtual key, down). Auto-repeats are included.
     pub fn take(&self) -> Vec<(u16, bool)> {
-        CAPTURE.with(|s| s.borrow_mut().as_mut().map(|s| std::mem::take(&mut s.events)).unwrap_or_default())
+        std::mem::take(&mut *self.events.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
 impl Drop for CaptureHook {
     fn drop(&mut self) {
+        // The thread unhooks itself once the keys still held are up.
         unsafe {
-            let _ = UnhookWindowsHookEx(self.handle);
+            let _ = PostThreadMessageW(self.thread_id, WM_FINISH, WPARAM(0), LPARAM(0));
         }
-        CAPTURE.with(|s| *s.borrow_mut() = None);
     }
+}
+
+fn capture_thread(state: CaptureState, ready: mpsc::Sender<crate::Result<u32>>) {
+    let mut msg = MSG::default();
+    let handle = unsafe {
+        // Make the message queue now, so WM_FINISH can't be posted before it exists.
+        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+        GetModuleHandleW(None).and_then(|m| SetWindowsHookExW(WH_KEYBOARD_LL, Some(capture_callback), Some(m.into()), 0))
+    };
+    let handle = match handle {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = ready.send(Err(e));
+            return;
+        }
+    };
+    CAPTURE.with(|s| *s.borrow_mut() = Some(state));
+    let _ = ready.send(Ok(unsafe { GetCurrentThreadId() }));
+    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        match msg.message {
+            WM_FINISH => {
+                let all_up = CAPTURE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    let state = s.as_mut().expect("set above");
+                    state.finishing = true;
+                    state.down.is_empty()
+                });
+                if all_up {
+                    break;
+                }
+                unsafe { SetTimer(None, 0, FINISH_TIMEOUT_MS, None) };
+            }
+            WM_TIMER => break,
+            _ => {}
+        }
+    }
+    unsafe {
+        let _ = UnhookWindowsHookEx(handle);
+    }
+    CAPTURE.with(|s| *s.borrow_mut() = None);
 }
 
 unsafe extern "system" fn capture_callback(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -165,21 +225,43 @@ unsafe extern "system" fn capture_callback(code: i32, wparam: WPARAM, lparam: LP
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         let key = info.vkCode as u16;
         let down = info.flags.0 & LLKHF_UP.0 == 0;
+        let mut wake = false;
         let swallow = CAPTURE.with(|s| {
             let Ok(mut state) = s.try_borrow_mut() else { return false };
             let Some(state) = state.as_mut() else { return false };
+            let held = state.down.contains(&key);
+            if state.finishing {
+                // Only the keys still held from the capture (their repeats and their ups).
+                if held && !down {
+                    state.down.retain(|&k| k != key);
+                    if state.down.is_empty() {
+                        unsafe { PostQuitMessage(0) };
+                    }
+                }
+                return held;
+            }
             if down {
-                if !state.down.contains(&key) {
+                if !held {
                     state.down.push(key);
                 }
-            } else if let Some(i) = state.down.iter().position(|&k| k == key) {
-                state.down.remove(i);
+            } else if held {
+                state.down.retain(|&k| k != key);
             } else {
                 return false; // went down before we started: let Windows see it go up
             }
-            state.events.push((key, down));
+            state.events.lock().unwrap_or_else(|e| e.into_inner()).push((key, down));
+            wake = true;
             true
         });
+        if wake {
+            CAPTURE.with(|s| {
+                if let Ok(state) = s.try_borrow() {
+                    if let Some(state) = state.as_ref() {
+                        (state.wake)();
+                    }
+                }
+            });
+        }
         if swallow {
             return LRESULT(1);
         }

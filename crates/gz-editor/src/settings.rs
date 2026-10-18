@@ -11,6 +11,7 @@ use std::sync::mpsc;
 use eframe::egui::{self, RichText, Vec2};
 use gz_core::config::{HotkeyName, Overlap, SETTINGS_FILE};
 use gz_core::{Capture, Captured, Color, DisabledZones, GamingFit, Hotkey, LogLevel, Modifiers, Settings};
+use gz_win::hotkey as win_hotkey;
 use gz_win::keyhook::CaptureHook;
 use gz_win::startup::{self, Elevated};
 use gz_win::{inspect, process};
@@ -80,6 +81,8 @@ pub struct SettingsWindow {
     live: bool,
     /// UI tests: key presses for a capturing hotkey box.
     pub(crate) fake_keys: Vec<(u16, bool)>,
+    /// UI tests: hotkeys "another app" holds.
+    pub(crate) fake_taken: Vec<Hotkey>,
 }
 
 impl SettingsWindow {
@@ -131,6 +134,7 @@ impl SettingsWindow {
             now: 0.0,
             live,
             fake_keys: Vec::new(),
+            fake_taken: Vec::new(),
         }
     }
 
@@ -271,7 +275,7 @@ impl SettingsWindow {
                 if capturing {
                     self.stop_capture();
                 } else {
-                    self.start_capture(name);
+                    self.start_capture(ui.ctx(), name);
                 }
             }
             if current.is_some() && ui.small_button("×").on_hover_text("Turn this hotkey off").clicked() {
@@ -302,11 +306,9 @@ impl SettingsWindow {
                 ui.checkbox(&mut m.alt, "Alt");
                 ui.checkbox(&mut m.shift, "Shift");
                 ui.label("+ 1 … 9");
-                // At least one modifier: unticking the last one is ignored.
-                if m != self.last_quick_switch && m.any() {
-                    self.last_quick_switch = m;
-                    self.settings.hotkeys.quick_switch = Some(m);
-                    self.failed &= !name.bit();
+                // Win, Ctrl or Alt stays ticked: unticking the last one is ignored.
+                if m != self.last_quick_switch && m.usable() {
+                    self.set_quick_switch(m);
                 }
             });
         });
@@ -339,11 +341,41 @@ impl SettingsWindow {
         }
     }
 
-    fn start_capture(&mut self, name: HotkeyName) {
+    /// New quick-switch modifiers, unless one of the nine hotkeys is taken.
+    fn set_quick_switch(&mut self, m: Modifiers) {
+        let name = HotkeyName::QuickSwitch;
+        let taken = gz_core::config::DIGIT_KEYS.map(|vk| m.with(vk)).find(|h| !self.is_free(h));
+        if let Some(h) = taken {
+            self.refused = Some((name, format!("{h} is already used by Windows or another app.")));
+            return;
+        }
+        if self.refused.as_ref().is_some_and(|(n, _)| *n == name) {
+            self.refused = None;
+        }
+        self.last_quick_switch = m;
+        self.settings.hotkeys.quick_switch = Some(m);
+        self.failed &= !name.bit();
+    }
+
+    /// Whether nothing else holds `hotkey`: our tray app's own hotkeys count as free (they
+    /// are checked against each other by [`Hotkeys::clashes`](gz_core::config::Hotkeys::clashes)).
+    fn is_free(&self, hotkey: &Hotkey) -> bool {
+        if self.saved.hotkeys.bindings().iter().any(|(_, h)| h == hotkey) {
+            return true;
+        }
+        if self.live {
+            win_hotkey::is_free(hotkey)
+        } else {
+            !self.fake_taken.contains(hotkey)
+        }
+    }
+
+    fn start_capture(&mut self, ctx: &egui::Context, name: HotkeyName) {
         self.stop_capture();
         self.refused = None;
         let hook = if self.live {
-            match CaptureHook::new() {
+            let ctx = ctx.clone();
+            match CaptureHook::new(move || ctx.request_repaint()) {
                 Ok(h) => Some(h),
                 Err(e) => {
                     self.refused = Some((name, format!("Couldn't read the keyboard: {}", e.message())));
@@ -378,7 +410,11 @@ impl SettingsWindow {
                     break;
                 }
                 Captured::NeedsModifier => {
-                    self.refused = Some((name, "Add Win, Ctrl, Alt or Shift.".into()));
+                    self.refused = Some((name, "Add Win, Ctrl or Alt.".into()));
+                }
+                Captured::WindowsShortcut(hotkey, what) => {
+                    self.refused =
+                        Some((name, format!("{hotkey} is a Windows shortcut ({what}). Choose other keys.")));
                 }
                 Captured::Unusable => self.refused = Some((name, "That key can't be used for a hotkey.".into())),
             }
@@ -392,8 +428,8 @@ impl SettingsWindow {
             }
             Some(_) => self.stop_capture(),
             None if lost_focus || timed_out => self.stop_capture(),
-            // The hook's keys don't wake egui up: look again shortly, only while capturing.
-            None => ctx.request_repaint_after(std::time::Duration::from_millis(30)),
+            // Key presses wake the window (the hook's `wake`); this is for the time-out.
+            None => ctx.request_repaint_after(std::time::Duration::from_secs_f64(CAPTURE_TIMEOUT - (self.now - c.started))),
         }
     }
 
@@ -412,6 +448,10 @@ impl SettingsWindow {
         if let Some((a, b)) = clash {
             let other = if a == name { b } else { a };
             self.refused = Some((name, format!("{hotkey} is already used for \"{}\".", hotkey_label(other))));
+            return;
+        }
+        if !self.is_free(&hotkey) {
+            self.refused = Some((name, format!("{hotkey} is already used by Windows or another app.")));
             return;
         }
         self.refused = None;

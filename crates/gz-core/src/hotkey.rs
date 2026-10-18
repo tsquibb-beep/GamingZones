@@ -22,6 +22,11 @@ impl Modifiers {
         self.win || self.ctrl || self.alt || self.shift
     }
 
+    /// Win, Ctrl or Alt held. Shift alone doesn't make a hotkey: Shift+A types an "A".
+    pub const fn usable(&self) -> bool {
+        self.win || self.ctrl || self.alt
+    }
+
     /// These modifiers with `vk`.
     pub const fn with(self, vk: u16) -> Hotkey {
         Hotkey { modifiers: self, vk }
@@ -223,7 +228,37 @@ impl From<Hotkey> for String {
     }
 }
 
+/// Shortcuts Windows keeps for itself or that every app relies on, with what they do.
+/// `RegisterHotKey` accepts some of them (Alt+Tab), and Win+L locks the screen whatever
+/// an app does, so they're refused by name.
+const WINDOWS_SHORTCUTS: [(Modifiers, u16, &str); 11] = {
+    const fn m(win: bool, ctrl: bool, alt: bool, shift: bool) -> Modifiers {
+        Modifiers { win, ctrl, alt, shift }
+    }
+    const TAB: u16 = 0x09;
+    const ESC: u16 = 0x1B;
+    [
+        (m(true, false, false, false), 0x4C, "locks the screen"),
+        (m(false, true, true, false), 0x2E, "the security screen"),
+        (m(false, true, false, true), ESC, "opens Task Manager"),
+        (m(false, true, false, false), ESC, "opens Start"),
+        (m(false, false, true, false), TAB, "switches windows"),
+        (m(false, false, true, true), TAB, "switches windows"),
+        (m(false, true, true, false), TAB, "switches windows"),
+        (m(true, false, false, false), TAB, "Task View"),
+        (m(false, false, true, false), ESC, "switches windows"),
+        (m(false, false, true, false), 0x73, "closes windows"),
+        (m(false, false, true, false), 0x20, "opens the window menu"),
+    ]
+};
+
 impl Hotkey {
+    /// What Windows does with these keys, if they're one of its own shortcuts (see
+    /// [`WINDOWS_SHORTCUTS`]). Taken shortcuts that `RegisterHotKey` reports aren't listed.
+    pub fn windows_shortcut(&self) -> Option<&'static str> {
+        WINDOWS_SHORTCUTS.iter().find(|(m, vk, _)| *m == self.modifiers && *vk == self.vk).map(|&(_, _, what)| what)
+    }
+
     /// Whether it can be written in settings.json and read back (keys without a name, e.g.
     /// media keys, can't).
     pub fn has_name(&self) -> bool {
@@ -239,8 +274,10 @@ pub enum Captured {
     Done(Hotkey),
     /// Esc on its own: keep the old hotkey.
     Cancelled,
-    /// A key without Win, Ctrl, Alt or Shift.
+    /// A key without Win, Ctrl or Alt.
     NeedsModifier,
+    /// One of Windows' own shortcuts: what it does (see [`Hotkey::windows_shortcut`]).
+    WindowsShortcut(Hotkey, &'static str),
     /// A key that has no name (see [`Hotkey::has_name`]).
     Unusable,
 }
@@ -291,11 +328,13 @@ impl Capture {
         if vk == 0x1B && !modifiers.any() {
             return Captured::Cancelled;
         }
-        if !modifiers.any() {
+        if !modifiers.usable() {
             return Captured::NeedsModifier;
         }
         let hotkey = modifiers.with(vk);
-        if hotkey.has_name() {
+        if let Some(what) = hotkey.windows_shortcut() {
+            Captured::WindowsShortcut(hotkey, what)
+        } else if hotkey.has_name() {
             Captured::Done(hotkey)
         } else {
             Captured::Unusable
@@ -381,12 +420,28 @@ mod tests {
         assert_eq!(c.key(0x4B, true), Captured::NeedsModifier);
         assert_eq!(c.key(0x4B, false), Captured::Waiting);
 
-        // Esc alone cancels; with a modifier it's a hotkey like any other.
+        // Esc alone cancels; with modifiers it's a hotkey like any other.
         assert_eq!(c.key(0x1B, true), Captured::Cancelled);
         c.key(0xA4, true);
-        assert_eq!(c.key(0x1B, true), Captured::Done(hk("Alt+Esc")));
+        c.key(0xA2, true);
+        assert_eq!(c.key(0x1B, true), Captured::Done(hk("Ctrl+Alt+Esc")));
+        c.key(0xA2, false);
+
+        // Windows' own shortcuts are refused.
+        assert_eq!(c.key(0x09, true), Captured::WindowsShortcut(hk("Alt+Tab"), "switches windows"));
+        assert_eq!(c.key(0x73, true), Captured::WindowsShortcut(hk("Alt+F4"), "closes windows"));
+        c.key(0xA4, false);
+        c.key(0x5B, true);
+        assert_eq!(c.key(0x4C, true), Captured::WindowsShortcut(hk("Win+L"), "locks the screen"));
+        c.key(0x5B, false);
+
+        // Shift on its own isn't enough.
+        c.key(0xA0, true);
+        assert_eq!(c.key(0x41, true), Captured::NeedsModifier);
+        c.key(0xA0, false);
 
         // A key with no name (VK_VOLUME_UP) can't be used.
+        c.key(0xA2, true);
         assert_eq!(c.key(0xAF, true), Captured::Unusable);
         assert!(hk("Win+Ctrl+Alt+F13").has_name());
     }

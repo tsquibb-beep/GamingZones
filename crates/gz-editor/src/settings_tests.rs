@@ -14,7 +14,9 @@ use crate::style;
 const LWIN: u16 = 0x5B;
 const LCTRL: u16 = 0xA2;
 const LALT: u16 = 0xA4;
+const LSHIFT: u16 = 0xA0;
 const ESC: u16 = 0x1B;
+const TAB: u16 = 0x09;
 
 fn harness(settings: Settings) -> Harness<'static, SettingsWindow> {
     let window = SettingsWindow::for_test(settings);
@@ -84,7 +86,7 @@ fn a_key_without_a_modifier_waits_for_more_and_esc_cancels() {
     click(&mut h, "Win+Ctrl+Alt+G");
     press(&mut h, &[0x4B]); // K alone
     assert_eq!(h.state().is_capturing(), Some(HotkeyName::GamingSnap));
-    h.get_by_label("Add Win, Ctrl, Alt or Shift.");
+    h.get_by_label("Add Win, Ctrl or Alt.");
     press(&mut h, &[ESC]);
     assert_eq!(h.state().is_capturing(), None);
     assert_eq!(h.state().settings.hotkeys.gaming_snap, hk("Win+Ctrl+Alt+G"));
@@ -130,6 +132,42 @@ fn the_last_quick_switch_modifier_stays() {
     let mut h = harness(s);
     click(&mut h, "Ctrl");
     assert_eq!(h.state().settings.hotkeys.quick_switch.unwrap().to_string(), "Ctrl");
+    // Shift alone isn't enough either.
+    click(&mut h, "Shift");
+    click(&mut h, "Ctrl");
+    assert_eq!(h.state().settings.hotkeys.quick_switch.unwrap().to_string(), "Ctrl+Shift");
+}
+
+#[test]
+fn windows_shortcuts_and_shift_alone_are_refused() {
+    let mut h = harness(Settings::default());
+    click(&mut h, "Win+Shift+`");
+    press(&mut h, &[LALT, TAB]);
+    h.get_by_label("Alt+Tab is a Windows shortcut (switches windows). Choose other keys.");
+    press(&mut h, &[LSHIFT, 0x41]); // Shift+A
+    h.get_by_label("Add Win, Ctrl or Alt.");
+    // Still waiting: the next try is taken.
+    assert_eq!(h.state().is_capturing(), Some(HotkeyName::LayoutSelector));
+    press(&mut h, &[LWIN, LCTRL, 0x4C]);
+    assert_eq!(written(&h).hotkeys.layout_selector, hk("Win+Ctrl+L"));
+}
+
+#[test]
+fn keys_another_app_holds_are_refused() {
+    let mut h = harness(Settings::default());
+    h.state_mut().fake_taken = vec!["Win+D".parse().unwrap(), "Win+Ctrl+5".parse().unwrap()];
+    click(&mut h, "Win+Shift+`");
+    press(&mut h, &[LWIN, 0x44]); // Win+D
+    assert_eq!(h.state().settings.hotkeys.layout_selector, hk("Win+Shift+`"));
+    h.get_by_label("Win+D is already used by Windows or another app.");
+    // Quick-switch: Win+Ctrl+1..9 would include the taken Win+Ctrl+5.
+    click(&mut h, "Alt");
+    assert_eq!(h.state().settings.hotkeys.quick_switch.unwrap().to_string(), "Win+Ctrl+Alt");
+    h.get_by_label("Win+Ctrl+5 is already used by Windows or another app.");
+    // The keys our tray app already holds are fine.
+    click(&mut h, "Win+Ctrl+Alt+G");
+    press(&mut h, &[LWIN, LCTRL, LALT, 0x47]);
+    assert_eq!(h.state().refused, None);
 }
 
 #[test]
