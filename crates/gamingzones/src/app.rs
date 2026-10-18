@@ -233,7 +233,7 @@ impl App {
         let items = [
             MenuItem::Item { id: CMD_RELOAD, label: "&Reload config", enabled: true },
             MenuItem::Item { id: CMD_EDITOR, label: "Open &editor", enabled: true },
-            MenuItem::Item { id: CMD_SETTINGS, label: "&Settings", enabled: false },
+            MenuItem::Item { id: CMD_SETTINGS, label: "&Settings", enabled: true },
             MenuItem::Separator,
             MenuItem::Item { id: CMD_EXIT, label: "E&xit", enabled: true },
         ];
@@ -242,7 +242,8 @@ impl App {
                 log::info!("Reload requested from the tray menu");
                 self.reload(hwnd, false);
             }
-            Some(CMD_EDITOR) => self.open_editor(),
+            Some(CMD_EDITOR) => self.open_editor(&[]),
+            Some(CMD_SETTINGS) => self.open_editor(&["--settings"]),
             Some(CMD_EXIT) => {
                 // Posted, not DestroyWindow here: WM_DESTROY must reach `handle` (see
                 // WindowHandler's re-entrancy note).
@@ -252,12 +253,13 @@ impl App {
         }
     }
 
-    /// Starts gz-editor.exe from our own folder. It's a separate process, so nothing of
-    /// it stays in ours once it exits; it keeps itself to one instance.
-    fn open_editor(&self) {
+    /// Starts gz-editor.exe from our own folder (with `--settings`, the settings window).
+    /// It's a separate process, so nothing of it stays in ours once it exits; it keeps
+    /// itself to one window.
+    fn open_editor(&self, args: &[&str]) {
         let path = std::env::current_exe().unwrap_or_default().with_file_name("gz-editor.exe");
-        match std::process::Command::new(&path).spawn() {
-            Ok(child) => log::info!("Started the editor (pid {})", child.id()),
+        match std::process::Command::new(&path).args(args).spawn() {
+            Ok(child) => log::info!("Started gz-editor {} (pid {})", args.join(" "), child.id()),
             Err(e) => {
                 log::error!("Could not start {}: {e}", path.display());
                 self.notify("Couldn't open the editor", &format!("{}: {e}", path.display()));

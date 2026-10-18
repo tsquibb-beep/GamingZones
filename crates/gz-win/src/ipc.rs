@@ -19,6 +19,27 @@ pub fn find_window(class: &str) -> Option<Hwnd> {
     unsafe { FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) }.ok().and_then(Hwnd::from_raw)
 }
 
+/// Sends `msg` to `target` and returns its reply. Waits at most `timeout_ms`, and not at
+/// all if the target is hung (then `Err`).
+pub fn send_message(target: Hwnd, msg: u32, wparam: usize, lparam: isize, timeout_ms: u32) -> crate::Result<isize> {
+    let mut result = 0usize;
+    let ok = unsafe {
+        SendMessageTimeoutW(
+            target.raw(),
+            msg,
+            WPARAM(wparam),
+            LPARAM(lparam),
+            SMTO_ABORTIFHUNG,
+            timeout_ms,
+            Some(&mut result),
+        )
+    };
+    if ok.0 == 0 {
+        return Err(crate::Error::from_thread());
+    }
+    Ok(result as isize)
+}
+
 /// Sends `data` to `target` with `WM_COPYDATA` (`kind` says what it is). Waits at most two
 /// seconds, and not at all if the target is hung.
 pub fn send_data(target: Hwnd, sender: Option<Hwnd>, kind: usize, data: &[u8]) -> crate::Result<()> {

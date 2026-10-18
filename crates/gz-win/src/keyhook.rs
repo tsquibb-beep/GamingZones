@@ -1,11 +1,13 @@
-//! A low-level keyboard hook (`WH_KEYBOARD_LL`) for use **during a drag only**.
-//!
-//! PLAN §1 forbids persistent low-level hooks. This one is created when a drag starts and
-//! dropped when it ends. It lets Shift/Ctrl/Esc take effect while the mouse is still.
+//! Low-level keyboard hooks (`WH_KEYBOARD_LL`), never persistent (PLAN §1):
+//! - [`KeyboardHook`], **during a drag only** (tray app). It's created when a drag starts and
+//!   dropped when it ends, and lets Shift/Ctrl/Esc take effect while the mouse is still.
+//! - [`CaptureHook`], **while a hotkey box is capturing** (settings window). It takes every
+//!   key press for itself, so Win+… combinations reach the box instead of Windows or the app
+//!   that owns them.
 //!
 //! While a low-level hook is installed, every key press in the system waits for this
 //! thread to run the callback, so the thread must keep pumping messages and never block.
-//! The callback only posts a message; keys are always passed on, never swallowed.
+//! `KeyboardHook`'s callback only posts a message and always passes keys on.
 
 use std::cell::RefCell;
 
@@ -104,6 +106,83 @@ unsafe extern "system" fn callback(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 let _ = PostMessageW(Some(state.target.raw()), state.msg, WPARAM(key as usize), LPARAM(down as isize));
             }
         });
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+struct CaptureState {
+    /// Key presses (virtual key, down) not yet taken by [`CaptureHook::take`].
+    events: Vec<(u16, bool)>,
+    /// Keys that went down while capturing: only their ups are swallowed, so a key held
+    /// before the hook existed is still released properly.
+    down: Vec<u16>,
+}
+
+thread_local! {
+    static CAPTURE: RefCell<Option<CaptureState>> = const { RefCell::new(None) };
+}
+
+/// Takes all keyboard input while it exists (one per thread); removed on drop. The thread
+/// must keep pumping messages; read the keys with [`CaptureHook::take`].
+pub struct CaptureHook {
+    handle: HHOOK,
+}
+
+impl CaptureHook {
+    pub fn new() -> crate::Result<Self> {
+        if CAPTURE.with(|s| s.borrow().is_some()) {
+            return Err(crate::Error::new(
+                windows::core::HRESULT(0x8000_000Eu32 as i32),
+                "capture hook already installed",
+            ));
+        }
+        let handle = unsafe {
+            let module = GetModuleHandleW(None)?;
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(capture_callback), Some(module.into()), 0)?
+        };
+        CAPTURE.with(|s| *s.borrow_mut() = Some(CaptureState { events: Vec::new(), down: Vec::new() }));
+        Ok(Self { handle })
+    }
+
+    /// The key presses since the last call: (virtual key, down). Auto-repeats are included.
+    pub fn take(&self) -> Vec<(u16, bool)> {
+        CAPTURE.with(|s| s.borrow_mut().as_mut().map(|s| std::mem::take(&mut s.events)).unwrap_or_default())
+    }
+}
+
+impl Drop for CaptureHook {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.handle);
+        }
+        CAPTURE.with(|s| *s.borrow_mut() = None);
+    }
+}
+
+unsafe extern "system" fn capture_callback(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        // SAFETY: for HC_ACTION, lParam points to a KBDLLHOOKSTRUCT valid for this call.
+        let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+        let key = info.vkCode as u16;
+        let down = info.flags.0 & LLKHF_UP.0 == 0;
+        let swallow = CAPTURE.with(|s| {
+            let Ok(mut state) = s.try_borrow_mut() else { return false };
+            let Some(state) = state.as_mut() else { return false };
+            if down {
+                if !state.down.contains(&key) {
+                    state.down.push(key);
+                }
+            } else if let Some(i) = state.down.iter().position(|&k| k == key) {
+                state.down.remove(i);
+            } else {
+                return false; // went down before we started: let Windows see it go up
+            }
+            state.events.push((key, down));
+            true
+        });
+        if swallow {
+            return LRESULT(1);
+        }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }

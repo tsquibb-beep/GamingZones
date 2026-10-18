@@ -14,4 +14,4 @@ pub mod store;
 
 pub use config::{Color, DisabledZones, GamingFit, HotkeyName, LogLevel, Overlap, Settings};
 pub use geometry::{Insets, Rect};
-pub use hotkey::{Hotkey, Modifiers};
+pub use hotkey::{Capture, Captured, Hotkey, Modifiers};

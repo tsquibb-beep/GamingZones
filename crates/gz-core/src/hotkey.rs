@@ -223,6 +223,86 @@ impl From<Hotkey> for String {
     }
 }
 
+impl Hotkey {
+    /// Whether it can be written in settings.json and read back (keys without a name, e.g.
+    /// media keys, can't).
+    pub fn has_name(&self) -> bool {
+        self.to_string().parse::<Hotkey>().is_ok_and(|h| h == *self)
+    }
+}
+
+/// What a key press during hotkey capture led to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Captured {
+    /// Still waiting (a modifier went down or up).
+    Waiting,
+    Done(Hotkey),
+    /// Esc on its own: keep the old hotkey.
+    Cancelled,
+    /// A key without Win, Ctrl, Alt or Shift.
+    NeedsModifier,
+    /// A key that has no name (see [`Hotkey::has_name`]).
+    Unusable,
+}
+
+/// Turns raw key presses (virtual keys, left/right modifiers as the low-level keyboard hook
+/// reports them) into a hotkey: the modifiers held when the first other key goes down.
+#[derive(Clone, Debug, Default)]
+pub struct Capture {
+    /// Modifier keys (left/right variants) currently down.
+    down: Vec<u16>,
+}
+
+impl Capture {
+    /// The modifier a virtual key is, if any.
+    fn modifier(vk: u16) -> Option<fn(&mut Modifiers)> {
+        match vk {
+            0x5B | 0x5C => Some(|m| m.win = true),          // LWIN, RWIN
+            0x11 | 0xA2 | 0xA3 => Some(|m| m.ctrl = true),  // CONTROL, LCONTROL, RCONTROL
+            0x12 | 0xA4 | 0xA5 => Some(|m| m.alt = true),   // MENU, LMENU, RMENU
+            0x10 | 0xA0 | 0xA1 => Some(|m| m.shift = true), // SHIFT, LSHIFT, RSHIFT
+            _ => None,
+        }
+    }
+
+    /// The modifiers held right now.
+    pub fn modifiers(&self) -> Modifiers {
+        let mut m = Modifiers::default();
+        for &vk in &self.down {
+            if let Some(set) = Self::modifier(vk) {
+                set(&mut m);
+            }
+        }
+        m
+    }
+
+    pub fn key(&mut self, vk: u16, down: bool) -> Captured {
+        if Self::modifier(vk).is_some() {
+            self.down.retain(|&k| k != vk);
+            if down {
+                self.down.push(vk);
+            }
+            return Captured::Waiting;
+        }
+        if !down {
+            return Captured::Waiting;
+        }
+        let modifiers = self.modifiers();
+        if vk == 0x1B && !modifiers.any() {
+            return Captured::Cancelled;
+        }
+        if !modifiers.any() {
+            return Captured::NeedsModifier;
+        }
+        let hotkey = modifiers.with(vk);
+        if hotkey.has_name() {
+            Captured::Done(hotkey)
+        } else {
+            Captured::Unusable
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +360,35 @@ mod tests {
         assert_eq!("Win+A".parse::<Modifiers>(), Err(HotkeyError::UnexpectedKey("A".into())));
         assert_eq!("Win+Banana".parse::<Modifiers>(), Err(HotkeyError::UnknownKey("Banana".into())));
         assert_eq!(serde_json::to_string(&m).unwrap(), "\"Win+Ctrl+Alt\"");
+    }
+
+    #[test]
+    fn capture() {
+        let mut c = Capture::default();
+        // Win down, Shift down, ` down: Win+Shift+`.
+        assert_eq!(c.key(0x5B, true), Captured::Waiting);
+        assert_eq!(c.key(0xA1, true), Captured::Waiting);
+        assert_eq!(c.modifiers(), Modifiers { win: true, shift: true, ..Default::default() });
+        assert_eq!(c.key(0xC0, true), Captured::Done(hk("Win+Shift+`")));
+
+        // Left and right Ctrl: letting go of one keeps Ctrl held.
+        let mut c = Capture::default();
+        c.key(0xA2, true);
+        c.key(0xA3, true);
+        c.key(0xA2, false);
+        assert_eq!(c.key(0x4B, true), Captured::Done(hk("Ctrl+K")));
+        c.key(0xA3, false);
+        assert_eq!(c.key(0x4B, true), Captured::NeedsModifier);
+        assert_eq!(c.key(0x4B, false), Captured::Waiting);
+
+        // Esc alone cancels; with a modifier it's a hotkey like any other.
+        assert_eq!(c.key(0x1B, true), Captured::Cancelled);
+        c.key(0xA4, true);
+        assert_eq!(c.key(0x1B, true), Captured::Done(hk("Alt+Esc")));
+
+        // A key with no name (VK_VOLUME_UP) can't be used.
+        assert_eq!(c.key(0xAF, true), Captured::Unusable);
+        assert!(hk("Win+Ctrl+Alt+F13").has_name());
     }
 
     #[test]

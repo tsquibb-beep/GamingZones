@@ -16,6 +16,7 @@ pub mod keyhook;
 pub mod monitor;
 pub mod paint;
 pub mod process;
+pub mod startup;
 pub mod styles;
 pub mod time;
 pub mod tray;
