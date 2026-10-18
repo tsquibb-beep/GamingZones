@@ -474,10 +474,22 @@ fn stopping_a_layout_on_a_monitor() {
     h.get_by_label("Use on this monitor");
 }
 
-/// Presses and lets go of Shift on its own.
+/// Presses and lets go of Shift on its own, the way egui-winit reports it: the modifiers
+/// change, and Shift arrives as a key too (repeating while it's held).
 fn tap_shift(h: &mut Harness<'_, Editor>) {
+    let shift = |pressed, repeat, modifiers| Event::Key {
+        key: Key::ShiftLeft,
+        physical_key: Some(Key::ShiftLeft),
+        pressed,
+        repeat,
+        modifiers,
+    };
     h.event(Event::ModifiersChanged(Modifiers::SHIFT));
+    h.event(shift(true, false, Modifiers::SHIFT));
     h.run_steps(1);
+    h.event(shift(true, true, Modifiers::SHIFT));
+    h.run_steps(1);
+    h.event(shift(false, false, Modifiers::NONE));
     h.event(Event::ModifiersChanged(Modifiers::NONE));
     h.run_steps(1);
 }

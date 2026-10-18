@@ -680,8 +680,11 @@ impl Editor {
     /// Shift was pressed and let go, with nothing else (a key, a click, Ctrl or Alt) in between.
     fn shift_tapped(&mut self, ctx: &egui::Context) -> bool {
         let (shift, other) = ctx.input(|i| {
-            let pressed = i.events.iter().any(|e| {
-                matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::PointerButton { pressed: true, .. })
+            // Shift itself arrives as a key press too (and repeats while held), so it doesn't count.
+            let pressed = i.events.iter().any(|e| match e {
+                egui::Event::Key { key, pressed: true, .. } => !matches!(key, Key::ShiftLeft | Key::ShiftRight),
+                egui::Event::PointerButton { pressed: true, .. } => true,
+                _ => false,
             });
             (i.modifiers.shift, pressed || i.modifiers.command || i.modifiers.alt)
         });
