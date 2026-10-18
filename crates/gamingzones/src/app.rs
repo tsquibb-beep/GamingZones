@@ -3,16 +3,17 @@
 //! Everything here is driven by window messages. Between messages the thread sleeps in
 //! GetMessageW, so the app uses no CPU while idle. The only hook that exists while no
 //! window is being dragged is the move/size WinEvent hook, which Windows calls only when a
-//! drag starts or ends.
+//! drag starts or ends. (And a keyboard hook while a settings window hotkey box asks for
+//! one: see [`ipc::CAPTURE_MESSAGE`].)
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gz_core::config::{HotkeyName, DIGIT_KEYS};
 use gz_core::config::{LoadOutcome, SETTINGS_FILE};
-use gz_core::ipc::{self, MAIN_WINDOW_CLASS, RELOAD_MESSAGE};
+use gz_core::ipc::{self, CAPTURE_KEY_MESSAGE, CAPTURE_MESSAGE, MAIN_WINDOW_CLASS, RELOAD_MESSAGE};
 use gz_core::{Hotkey, Settings};
-use gz_win::keyhook::KeyboardHook;
+use gz_win::keyhook::{CaptureHook, KeyboardHook};
 use gz_win::monitor::{self, MonitorIds, MonitorInfo};
 use gz_win::tray::{self, MenuItem, TrayIcon};
 use gz_win::window::{self, msg, Background, Message, WindowHandler, WindowSpec};
@@ -59,6 +60,9 @@ const HOTKEY_QUICK_SWITCH: i32 = 10;
 /// `WM_TIMER` id: the end of the zone flash after a layout switch.
 const TIMER_FLASH: usize = 1;
 const FLASH_MS: u32 = 600;
+/// `WM_TIMER` id: a hotkey capture nobody stopped ends anyway.
+const TIMER_CAPTURE: usize = 2;
+const CAPTURE_MAX_MS: u32 = 30_000;
 
 pub struct App {
     config_dir: PathBuf,
@@ -67,6 +71,8 @@ pub struct App {
     tray: Option<TrayIcon>,
     registered: Vec<i32>,
     reload_msg: u32,
+    capture_msg: u32,
+    capture_key_msg: u32,
     taskbar_created_msg: u32,
     self_elevated: bool,
     movesize_hook: Option<WinEventHook>,
@@ -78,6 +84,8 @@ pub struct App {
     /// The new layout's zones, shown briefly after a switch.
     flash: Option<Overlay>,
     selector: Option<Selector>,
+    /// Keys for a settings window hotkey box.
+    capture: Option<CaptureHook>,
 }
 
 /// Creates the hidden window; the app lives in its handler until the window is destroyed.
@@ -89,6 +97,8 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
         tray: None,
         registered: Vec::new(),
         reload_msg: window::register_window_message(RELOAD_MESSAGE),
+        capture_msg: window::register_window_message(CAPTURE_MESSAGE),
+        capture_key_msg: window::register_window_message(CAPTURE_KEY_MESSAGE),
         taskbar_created_msg: tray::taskbar_created_message(),
         self_elevated: process::current_is_elevated().unwrap_or(false),
         movesize_hook: None,
@@ -97,6 +107,7 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
         preview: None,
         flash: None,
         selector: None,
+        capture: None,
     };
     // A hidden top-level window rather than a message-only one: only top-level windows get
     // the TaskbarCreated and WM_DISPLAYCHANGE broadcasts.
@@ -116,7 +127,7 @@ impl App {
     fn on_create(&mut self, hwnd: Hwnd) {
         dump::log_self(hwnd);
         // If we run elevated, the (possibly non-elevated) editor must still reach us.
-        for m in [self.reload_msg, msg::COPYDATA] {
+        for m in [self.reload_msg, self.capture_msg, msg::COPYDATA] {
             if let Err(e) = win_ipc::allow_message(hwnd, m) {
                 log::warn!("Could not allow message {m:#X} from other processes: {}", e.message());
             }
@@ -557,6 +568,43 @@ impl App {
     }
 }
 
+impl App {
+    /// The settings window starts or stops a hotkey capture. Keys go to its window as
+    /// `capture_key_msg` and aren't logged.
+    fn on_capture(&mut self, hwnd: Hwnd, m: &Message) -> isize {
+        let was_capturing = self.capture.take().is_some();
+        window::kill_timer(hwnd, TIMER_CAPTURE);
+        if m.wparam != ipc::CAPTURE_START {
+            if was_capturing {
+                log::debug!("Hotkey capture stopped");
+            }
+            return 0;
+        }
+        let Some(target) = winevent::message_window(m.lparam) else { return 0 };
+        let (key_msg, stop_msg) = (self.capture_key_msg, self.capture_msg);
+        let hook = CaptureHook::new(move |vk, down| {
+            if window::post_message(target, key_msg, vk as usize, down as isize).is_err() {
+                // The settings window has gone.
+                let _ = window::post_message(hwnd, stop_msg, ipc::CAPTURE_STOP, 0);
+            }
+        });
+        match hook {
+            Ok(hook) => {
+                log::debug!("Hotkey capture started for window {target}");
+                self.capture = Some(hook);
+                if let Err(e) = window::set_timer(hwnd, TIMER_CAPTURE, CAPTURE_MAX_MS) {
+                    log::warn!("Could not set the capture timer: {}", e.message());
+                }
+                ipc::CAPTURE_STARTED
+            }
+            Err(e) => {
+                log::warn!("Could not start the hotkey capture: {}", e.message());
+                0
+            }
+        }
+    }
+}
+
 impl WindowHandler for App {
     fn handle(&mut self, hwnd: Hwnd, m: &Message) -> Option<isize> {
         match m.msg {
@@ -579,6 +627,12 @@ impl WindowHandler for App {
             msg::TIMER if m.wparam == TIMER_FLASH => {
                 window::kill_timer(hwnd, TIMER_FLASH);
                 self.flash = None;
+            }
+            msg::TIMER if m.wparam == TIMER_CAPTURE => {
+                window::kill_timer(hwnd, TIMER_CAPTURE);
+                if self.capture.take().is_some() {
+                    log::debug!("Hotkey capture timed out");
+                }
             }
             WM_MOVESIZE => self.on_move_size(hwnd, m),
             WM_DRAG_LOCATION => {
@@ -622,6 +676,7 @@ impl WindowHandler for App {
                 let failed = self.reload(hwnd, m.wparam == ipc::RELOAD_QUIET);
                 return Some(ipc::RELOAD_DONE | failed as isize);
             }
+            other if other != 0 && other == self.capture_msg => return Some(self.on_capture(hwnd, m)),
             other if other != 0 && other == self.taskbar_created_msg => {
                 log::info!("Taskbar re-created; adding the tray icon again");
                 if let Some(tray) = &self.tray {

@@ -1,16 +1,16 @@
 //! Low-level keyboard hooks (`WH_KEYBOARD_LL`), never persistent (PLAN §1):
 //! - [`KeyboardHook`], **during a drag only** (tray app). It's created when a drag starts and
 //!   dropped when it ends, and lets Shift/Ctrl/Esc take effect while the mouse is still.
-//! - [`CaptureHook`], **while a hotkey box is capturing** (settings window), on a thread of
-//!   its own. It takes every key press for itself, so Win+… combinations reach the box
-//!   instead of Windows or the app that owns them.
+//! - [`CaptureHook`], **while a hotkey box in the settings window is capturing**, held by the
+//!   tray app on a thread of its own. It takes every key press for itself, so Win+…
+//!   combinations reach the box instead of Windows or the app that owns them.
 //!
 //! While a low-level hook is installed, every key press in the system waits for this
 //! thread to run the callback, so the thread must keep pumping messages and never block.
 //! `KeyboardHook`'s callback only posts a message and always passes keys on.
 
 use std::cell::RefCell;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -115,10 +115,8 @@ unsafe extern "system" fn callback(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 
 /// The capture hook's state, on its own thread.
 struct CaptureState {
-    /// Key presses (virtual key, down) not yet taken by [`CaptureHook::take`].
-    events: Arc<Mutex<Vec<(u16, bool)>>>,
-    /// Called after each key press it takes.
-    wake: Box<dyn Fn() + Send>,
+    /// Called with each key press it takes: (virtual key, down).
+    on_key: Box<dyn Fn(u16, bool) + Send>,
     /// Keys that went down while capturing: only their ups are swallowed, so a key held
     /// before the hook existed is still released properly.
     down: Vec<u16>,
@@ -136,24 +134,26 @@ const WM_FINISH: u32 = WM_APP + 1;
 const FINISH_TIMEOUT_MS: u32 = 1000;
 
 /// Takes all keyboard input while it exists, so Win+… combinations reach the hotkey box
-/// instead of Windows or the app that owns them. Read the keys with [`CaptureHook::take`].
+/// instead of Windows or the app that owns them.
 ///
-/// The hook runs on a thread of its own that only pumps messages. Windows waits a limited
-/// time for a low-level hook to answer, then passes the key on; on the UI thread a slow
-/// frame could let a Win+D through. Dropping it stops taking keys, but the keys still held
-/// are swallowed until they're released (at most a second), or Windows would see the rest
-/// of the combination.
+/// Windows doesn't call a low-level hook while a window of the hook's own process is in
+/// front, so it lives in the tray app, not in the settings window (seen 2026-10-18: no key
+/// at all until another window was in front).
+///
+/// The hook runs on a thread of its own that only pumps messages: Windows waits a limited
+/// time for a low-level hook to answer, then passes the key on. Dropping it stops taking
+/// keys, but the keys still held are swallowed until they're released (at most a second),
+/// or Windows would see the rest of the combination.
 pub struct CaptureHook {
     thread_id: u32,
-    events: Arc<Mutex<Vec<(u16, bool)>>>,
 }
 
 impl CaptureHook {
-    /// `wake` is called on the hook's thread after each key press (e.g. to repaint).
-    pub fn new(wake: impl Fn() + Send + 'static) -> crate::Result<Self> {
-        let events = Arc::new(Mutex::new(Vec::new()));
+    /// `on_key(virtual key, down)` is called on the hook's thread for each key press it
+    /// takes, auto-repeats included. It must be quick (post a message, say).
+    pub fn new(on_key: impl Fn(u16, bool) + Send + 'static) -> crate::Result<Self> {
         let (ready, started) = mpsc::channel();
-        let state = CaptureState { events: events.clone(), wake: Box::new(wake), down: Vec::new(), finishing: false };
+        let state = CaptureState { on_key: Box::new(on_key), down: Vec::new(), finishing: false };
         std::thread::Builder::new()
             .name("capture hook".into())
             .spawn(move || capture_thread(state, ready))
@@ -161,12 +161,7 @@ impl CaptureHook {
         let thread_id = started.recv().map_err(|_| {
             crate::Error::new(windows::core::HRESULT(0x8000_4005u32 as i32), "capture hook thread ended")
         })??;
-        Ok(Self { thread_id, events })
-    }
-
-    /// The key presses since the last call: (virtual key, down). Auto-repeats are included.
-    pub fn take(&self) -> Vec<(u16, bool)> {
-        std::mem::take(&mut *self.events.lock().unwrap_or_else(|e| e.into_inner()))
+        Ok(Self { thread_id })
     }
 }
 
@@ -225,7 +220,6 @@ unsafe extern "system" fn capture_callback(code: i32, wparam: WPARAM, lparam: LP
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         let key = info.vkCode as u16;
         let down = info.flags.0 & LLKHF_UP.0 == 0;
-        let mut wake = false;
         let swallow = CAPTURE.with(|s| {
             let Ok(mut state) = s.try_borrow_mut() else { return false };
             let Some(state) = state.as_mut() else { return false };
@@ -249,19 +243,9 @@ unsafe extern "system" fn capture_callback(code: i32, wparam: WPARAM, lparam: LP
             } else {
                 return false; // went down before we started: let Windows see it go up
             }
-            state.events.lock().unwrap_or_else(|e| e.into_inner()).push((key, down));
-            wake = true;
+            (state.on_key)(key, down);
             true
         });
-        if wake {
-            CAPTURE.with(|s| {
-                if let Ok(state) = s.try_borrow() {
-                    if let Some(state) = state.as_ref() {
-                        (state.wake)();
-                    }
-                }
-            });
-        }
         if swallow {
             return LRESULT(1);
         }

@@ -12,11 +12,10 @@ use eframe::egui::{self, RichText, Vec2};
 use gz_core::config::{HotkeyName, Overlap, SETTINGS_FILE};
 use gz_core::{Capture, Captured, Color, DisabledZones, GamingFit, Hotkey, LogLevel, Modifiers, Settings};
 use gz_win::hotkey as win_hotkey;
-use gz_win::keyhook::CaptureHook;
 use gz_win::startup::{self, Elevated};
 use gz_win::{inspect, process};
 
-use crate::core_link;
+use crate::core_link::{self, KeyReceiver, TrayCapture};
 use crate::style;
 
 /// Width of the label column (wider than the editor's: the labels are longer).
@@ -52,8 +51,8 @@ impl Startup {
 struct Capturing {
     name: HotkeyName,
     capture: Capture,
-    /// `None` in the UI tests (they feed keys through `fake_keys`).
-    hook: Option<CaptureHook>,
+    /// The tray app's keyboard hook. `None` in the UI tests (they use `fake_keys`).
+    hook: Option<TrayCapture>,
     started: f64,
 }
 
@@ -70,6 +69,8 @@ pub struct SettingsWindow {
     /// A hotkey change that was refused, shown under its row: (hotkey, why).
     pub(crate) refused: Option<(HotkeyName, String)>,
     capturing: Option<Capturing>,
+    /// Where the tray app sends captured keys (made at the first capture).
+    receiver: Option<KeyReceiver>,
     /// Quick-switch modifiers to use when it's turned back on.
     last_quick_switch: Modifiers,
     pub(crate) startup: Startup,
@@ -127,6 +128,7 @@ impl SettingsWindow {
             failed: 0,
             refused: None,
             capturing: None,
+            receiver: None,
             last_quick_switch,
             startup,
             startup_job: None,
@@ -374,11 +376,10 @@ impl SettingsWindow {
         self.stop_capture();
         self.refused = None;
         let hook = if self.live {
-            let ctx = ctx.clone();
-            match CaptureHook::new(move || ctx.request_repaint()) {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    self.refused = Some((name, format!("Couldn't read the keyboard: {}", e.message())));
+            match self.tray_capture(ctx) {
+                Ok(c) => Some(c),
+                Err(why) => {
+                    self.refused = Some((name, why));
                     return;
                 }
             }
@@ -386,6 +387,20 @@ impl SettingsWindow {
             None
         };
         self.capturing = Some(Capturing { name, capture: Capture::default(), hook, started: self.now });
+    }
+
+    /// Has the tray app capture the keyboard for us: Windows doesn't call a low-level hook
+    /// of ours while this window is in front (see [`gz_core::ipc::CAPTURE_MESSAGE`]).
+    fn tray_capture(&mut self, ctx: &egui::Context) -> Result<TrayCapture, String> {
+        if self.receiver.is_none() {
+            let ctx = ctx.clone();
+            let receiver = KeyReceiver::new(move || ctx.request_repaint())
+                .map_err(|e| format!("Couldn't read the keyboard: {}", e.message()))?;
+            self.receiver = Some(receiver);
+        }
+        let receiver = self.receiver.as_ref().expect("made above");
+        receiver.take(); // anything left from an earlier capture
+        core_link::start_capture(receiver).ok_or_else(|| "GamingZones isn't running. Start it to change hotkeys.".into())
     }
 
     fn stop_capture(&mut self) {
@@ -396,9 +411,9 @@ impl SettingsWindow {
     /// complete, on Esc, when the window loses the focus or after a while with no key.
     fn poll_capture(&mut self, ctx: &egui::Context) {
         let Some(c) = &mut self.capturing else { return };
-        let keys = match &c.hook {
-            Some(hook) => hook.take(),
-            None => std::mem::take(&mut self.fake_keys),
+        let keys = match (&c.hook, &self.receiver) {
+            (Some(_), Some(receiver)) => receiver.take(),
+            _ => std::mem::take(&mut self.fake_keys),
         };
         let name = c.name;
         let mut result = None;
