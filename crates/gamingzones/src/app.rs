@@ -653,4 +653,3 @@ fn target_monitor() -> Option<MonitorInfo> {
         monitor::from_point(x, y)
     })
 }
-

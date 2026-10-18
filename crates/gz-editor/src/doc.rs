@@ -20,6 +20,13 @@ pub struct Stamps {
     applied: Option<SystemTime>,
 }
 
+impl Stamps {
+    /// Only applied.json differs between `self` and `other`.
+    pub fn only_applied_differs(&self, other: &Stamps) -> bool {
+        self.layouts == other.layouts && self.applied != other.applied
+    }
+}
+
 pub struct Files {
     pub dir: PathBuf,
 }

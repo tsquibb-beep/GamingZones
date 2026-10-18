@@ -533,3 +533,53 @@ fn how_to_edit_opens_from_the_top_bar() {
     h.run_steps(2);
     assert!(h.query_by_label("Clear the selection").is_none());
 }
+
+#[test]
+fn moving_layouts_up_and_down() {
+    let mut h = harness_with(two_layouts());
+    // The open layout ("Columns") moves with its card.
+    card_menu(&mut h, "Columns");
+    h.get_by_label("Move down").click();
+    h.run_steps(2);
+    let names =
+        |h: &Harness<'_, Editor>| h.state().doc.layouts.layouts.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&h), ["Other", "Columns"]);
+    assert_eq!(h.state().current().name, "Columns");
+    assert_eq!(written(&h).layouts[0].name, "Other");
+    // The last one can't move down; moving it up puts it back.
+    card_menu(&mut h, "Columns");
+    h.get_by_label("Move down").click();
+    h.run_steps(2);
+    assert_eq!(names(&h), ["Other", "Columns"]);
+    card_menu(&mut h, "Columns");
+    h.get_by_label("Move up").click();
+    h.run_steps(2);
+    assert_eq!(names(&h), ["Columns", "Other"]);
+    assert_eq!(written(&h).layouts[0].name, "Columns");
+}
+
+#[test]
+fn layout_changes_made_by_the_tray_app_are_picked_up() {
+    let mut h = harness_with(two_layouts());
+    // Something list-like is saved first, so both files exist.
+    card_menu(&mut h, "Other");
+    h.get_by_label("Move up").click();
+    h.run_steps(2);
+    // The tray app (a quick-switch key) puts the monitor on "other" behind the editor's back.
+    let path = h.state().files.applied_path();
+    let mut applied = gz_core::store::Applied::load(&path).unwrap().unwrap();
+    applied
+        .monitors
+        .insert("TEST-DELL".into(), gz_core::store::MonitorEntry { layout: Some("other".into()), name: "DELL".into() });
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    applied.save(&path).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().doc.applied.layout_for("TEST-DELL"), Some("other"));
+    // A list change afterwards saves without asking about files changed on disk.
+    card_menu(&mut h, "Other");
+    h.get_by_label("Move down").click();
+    h.run_steps(2);
+    assert!(h.state().dialog.is_none());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"other\""), "{text}");
+}

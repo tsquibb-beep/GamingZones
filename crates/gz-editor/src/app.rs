@@ -449,6 +449,7 @@ impl Editor {
     /// Makes a layout-list change (`f` runs on both the editor's and the saved copy) and
     /// writes it straight away. The open layout's unsaved changes stay unsaved.
     pub(crate) fn commit(&mut self, f: impl Fn(&mut Doc)) -> bool {
+        self.pick_up_applied();
         let (mut doc, mut saved) = (self.doc.clone(), self.saved.clone());
         f(&mut doc);
         f(&mut saved);
@@ -460,6 +461,21 @@ impl Editor {
         }
         (self.doc, self.saved) = (doc, saved);
         self.write(false, false)
+    }
+
+    /// The tray app writes applied.json itself (quick-switch keys, layout selector). When
+    /// that is the only change on disk, take its version: list changes are always saved at
+    /// once, so the editor has nothing unsaved in applied.json to lose.
+    pub(crate) fn pick_up_applied(&mut self) {
+        let now = self.files.stamps();
+        if !now.only_applied_differs(&self.stamps) {
+            return;
+        }
+        if let Ok(Some(applied)) = Applied::load(&self.files.applied_path()) {
+            self.doc.applied = applied.clone();
+            self.saved.applied = applied;
+            self.stamps = now;
+        }
     }
 
     /// Writes `saved` to the files, unless they changed on disk (then it asks first).
@@ -529,6 +545,19 @@ impl Editor {
             // Undo mustn't bring the old name back.
             for l in self.undo.iter_mut().chain(&mut self.redo) {
                 l.name = name.clone();
+            }
+        }
+    }
+
+    /// Moves layout `i` one place up or down the list (the quick-switch numbers follow it).
+    pub(crate) fn move_layout(&mut self, i: usize, up: bool) {
+        let len = self.doc.layouts.layouts.len();
+        let Some(j) = (if up { i.checked_sub(1) } else { Some(i + 1).filter(|&j| j < len) }) else { return };
+        if self.commit(|d| d.layouts.layouts.swap(i, j)) {
+            if self.layout == i {
+                self.layout = j;
+            } else if self.layout == j {
+                self.layout = i;
             }
         }
     }
@@ -1148,6 +1177,7 @@ impl Editor {
             return;
         }
         self.handle_close(&ctx);
+        self.pick_up_applied();
         self.shortcuts(&ctx);
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         egui::Panel::left("layouts").resizable(false).exact_size(260.0).show(ui, |ui| self.layout_list(ui));

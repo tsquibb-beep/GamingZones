@@ -1,5 +1,6 @@
-//! The layout list: a card per layout (a small picture of its zones and its name), a
-//! right-click menu (rename, duplicate, use on a monitor, delete) and renaming in place.
+//! The layout list: a card per layout (a small picture of its zones, its number and name),
+//! a right-click menu (rename, duplicate, move up/down, use on a monitor, delete) and
+//! renaming in place.
 
 use eframe::egui::{self, Align2, Color32, FontId, Key, Sense, Vec2};
 use gz_core::gaming::gcd;
@@ -11,6 +12,8 @@ use crate::style;
 
 /// Height of the name strip under a card's picture.
 const NAME_H: f32 = 32.0;
+/// The layout number on a card (the layout selector's blue).
+const NUMBER_COLOUR: Color32 = Color32::from_rgb(0x00, 0x8C, 0xFF);
 
 /// How a gaming zone's shape is usually called: "16:9", "21:9" (for 2560×1080, 3440×1440…).
 pub fn ratio_name(w: i32, h: i32) -> String {
@@ -90,8 +93,20 @@ impl Editor {
         if renaming {
             self.rename_box(ui, i, name_strip.shrink2(Vec2::new(4.0, 4.0)));
         } else {
+            // Layouts 1-9 are numbered: the quick-switch keys and the layout selector use them.
+            let mut x = r.left() + 8.0;
+            if i < 9 {
+                let number = painter.text(
+                    egui::pos2(x, text_y),
+                    Align2::LEFT_CENTER,
+                    (i + 1).to_string(),
+                    style::semibold(14.0),
+                    NUMBER_COLOUR,
+                );
+                x = number.right() + 8.0;
+            }
             painter.text(
-                egui::pos2(r.left() + 8.0, text_y),
+                egui::pos2(x, text_y),
                 Align2::LEFT_CENTER,
                 &layout.name,
                 FontId::proportional(14.0),
@@ -124,6 +139,15 @@ impl Editor {
         }
         if ui.button("Duplicate").clicked() {
             self.duplicate_layout(i);
+            ui.close();
+        }
+        let last = self.doc.layouts.layouts.len() - 1;
+        if ui.add_enabled(i > 0, egui::Button::new("Move up")).clicked() {
+            self.move_layout(i, true);
+            ui.close();
+        }
+        if ui.add_enabled(i < last, egui::Button::new("Move down")).clicked() {
+            self.move_layout(i, false);
             ui.close();
         }
         ui.menu_button("Use on", |ui| {
