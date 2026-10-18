@@ -3,7 +3,8 @@
 
 use gz_core::Hotkey;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+    MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MAPVK_VK_TO_CHAR, MOD_ALT, MOD_CONTROL,
+    MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
 };
 
 use crate::Hwnd;
@@ -42,9 +43,42 @@ pub fn is_free(hotkey: &Hotkey) -> bool {
     free
 }
 
+/// `hotkey` as the user's keyboard prints it. The punctuation keys show the character
+/// they type on this thread's keyboard layout: VK_OEM_3 is "`" on a US keyboard and "'" on
+/// a UK one, though settings.json calls it "`" either way.
+pub fn display(hotkey: &Hotkey) -> String {
+    let key = match hotkey.vk {
+        0xBA..=0xC0 | 0xDB..=0xDF | 0xE2 => layout_char(hotkey.vk),
+        _ => None,
+    };
+    match key {
+        Some(c) if hotkey.modifiers.any() => format!("{}+{c}", hotkey.modifiers),
+        Some(c) => c.to_string(),
+        None => hotkey.to_string(),
+    }
+}
+
+/// The character `vk` types on this thread's keyboard layout (unshifted).
+fn layout_char(vk: u16) -> Option<char> {
+    // The top bit marks a dead key (an accent); it still shows its character.
+    let code = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_CHAR) } & 0xFFFF;
+    char::from_u32(code).filter(|c| !c.is_control() && !c.is_whitespace())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_uses_the_keyboard_layout_for_punctuation() {
+        let h = |s: &str| s.parse::<Hotkey>().unwrap();
+        assert_eq!(display(&h("Win+Ctrl+Alt+G")), "Win+Ctrl+Alt+G");
+        assert_eq!(display(&h("Ctrl+F5")), "Ctrl+F5");
+        // Whatever the layout, a punctuation key shows as one character.
+        let shown = display(&h("Win+Shift+`"));
+        let key = shown.strip_prefix("Win+Shift+").unwrap();
+        assert_eq!(key.chars().count(), 1, "{shown}");
+    }
 
     #[test]
     fn a_hotkey_held_elsewhere_is_not_free() {

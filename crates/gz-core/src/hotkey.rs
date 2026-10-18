@@ -68,6 +68,11 @@ impl fmt::Display for HotkeyError {
 impl std::error::Error for HotkeyError {}
 
 /// Named keys: (canonical name, VK code, other accepted spellings).
+///
+/// The punctuation names are what the key prints on a US keyboard; other layouts print
+/// something else on the same key (VK_OEM_3 is ` in the US, ' in the UK). The settings
+/// window shows the user's own layout (`gz_win::hotkey::display`). OEM8 and OEM102 have no
+/// US key: on a UK keyboard they're ` and the \ next to left Shift.
 const NAMED_KEYS: &[(&str, u16, &[&str])] = &[
     ("`", 0xC0, &["Backtick", "Grave", "Tilde", "OEM3"]),
     ("-", 0xBD, &["Minus"]),
@@ -80,6 +85,8 @@ const NAMED_KEYS: &[(&str, u16, &[&str])] = &[
     (",", 0xBC, &["Comma"]),
     (".", 0xBE, &["Period"]),
     ("/", 0xBF, &["Slash"]),
+    ("OEM8", 0xDF, &[]),
+    ("OEM102", 0xE2, &[]),
     ("Space", 0x20, &[]),
     ("Tab", 0x09, &[]),
     ("Enter", 0x0D, &["Return"]),
@@ -373,6 +380,9 @@ mod tests {
     #[test]
     fn vk_codes() {
         assert_eq!(hk("Win+Shift+`").vk, 0xC0);
+        // Keys a US keyboard doesn't have (UK ` and \\).
+        assert_eq!(hk("Win+OEM8").vk, 0xDF);
+        assert_eq!(hk("Ctrl+OEM102").to_string(), "Ctrl+OEM102");
         assert_eq!(hk("Ctrl+F1").vk, 0x70);
         assert_eq!(hk("Ctrl+F24").vk, 0x87);
         assert_eq!(hk("Ctrl+9").vk, 0x39);

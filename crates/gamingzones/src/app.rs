@@ -222,7 +222,7 @@ impl App {
                         e.code().0
                     );
                     failed_mask |= name.bit();
-                    failed.push(hotkey.to_string());
+                    failed.push(hotkey::display(&hotkey));
                 }
             }
         }

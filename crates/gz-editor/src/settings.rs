@@ -266,7 +266,7 @@ impl SettingsWindow {
                     _ => "Press the keys…".into(),
                 }
             } else {
-                current.map_or("Off".into(), |h| h.to_string())
+                current.map_or("Off".into(), |h| self.key_text(&h))
             };
             let mut button = egui::Button::new(text).min_size(Vec2::new(HOTKEY_W, style::ROW_H));
             if capturing {
@@ -348,7 +348,7 @@ impl SettingsWindow {
         let name = HotkeyName::QuickSwitch;
         let taken = gz_core::config::DIGIT_KEYS.map(|vk| m.with(vk)).find(|h| !self.is_free(h));
         if let Some(h) = taken {
-            self.refused = Some((name, format!("{h} is already used by Windows or another app.")));
+            self.refused = Some((name, format!("{} is already used by Windows or another app.", self.key_text(&h))));
             return;
         }
         if self.refused.as_ref().is_some_and(|(n, _)| *n == name) {
@@ -370,6 +370,12 @@ impl SettingsWindow {
         } else {
             !self.fake_taken.contains(hotkey)
         }
+    }
+
+    /// A hotkey as the user's keyboard prints it (the UI tests use the settings.json names,
+    /// whatever the test machine's layout).
+    fn key_text(&self, hotkey: &Hotkey) -> String {
+        key_text(self.live, hotkey)
     }
 
     fn start_capture(&mut self, ctx: &egui::Context, name: HotkeyName) {
@@ -415,7 +421,7 @@ impl SettingsWindow {
             (Some(_), Some(receiver)) => receiver.take(),
             _ => std::mem::take(&mut self.fake_keys),
         };
-        let name = c.name;
+        let (name, live) = (c.name, self.live);
         let mut result = None;
         for (vk, down) in keys {
             match c.capture.key(vk, down) {
@@ -429,7 +435,7 @@ impl SettingsWindow {
                 }
                 Captured::WindowsShortcut(hotkey, what) => {
                     self.refused =
-                        Some((name, format!("{hotkey} is a Windows shortcut ({what}). Choose other keys.")));
+                        Some((name, format!("{} is a Windows shortcut ({what}). Choose other keys.", key_text(live, &hotkey))));
                 }
                 Captured::Unusable => self.refused = Some((name, "That key can't be used for a hotkey.".into())),
             }
@@ -462,11 +468,12 @@ impl SettingsWindow {
         let clash = trial.clashes().into_iter().find(|(a, b)| *a == name || *b == name);
         if let Some((a, b)) = clash {
             let other = if a == name { b } else { a };
-            self.refused = Some((name, format!("{hotkey} is already used for \"{}\".", hotkey_label(other))));
+            self.refused =
+                Some((name, format!("{} is already used for \"{}\".", self.key_text(&hotkey), hotkey_label(other))));
             return;
         }
         if !self.is_free(&hotkey) {
-            self.refused = Some((name, format!("{hotkey} is already used by Windows or another app.")));
+            self.refused = Some((name, format!("{} is already used by Windows or another app.", self.key_text(&hotkey))));
             return;
         }
         self.refused = None;
@@ -819,5 +826,14 @@ fn colour_button(ui: &mut egui::Ui, colour: &mut Color, label: &str) {
 impl eframe::App for SettingsWindow {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+}
+
+/// See [`SettingsWindow::key_text`].
+fn key_text(live: bool, hotkey: &Hotkey) -> String {
+    if live {
+        win_hotkey::display(hotkey)
+    } else {
+        hotkey.to_string()
     }
 }
