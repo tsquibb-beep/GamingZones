@@ -329,7 +329,7 @@ overlapping part of the window; Tom chose an opt-in "keep on top" (Phase 5). Det
   - Shift-drag behaviour (require Shift / always show zones);
   - overlay colours and opacity;
   - deadzone threshold; deadzoned zone display;
-  - overlap rule; exclusion list (exe names);
+  - overlap rule (hidden in 0.3.4 until the editor can make overlapping zones, see Phase 6); exclusion list (exe names);
   - gaming snap behaviour;
   - run at logon: HKCU Run, or an elevated Scheduled Task;
   - log level.
@@ -374,6 +374,9 @@ default 7). The editor picks up applied.json changes the tray app makes.
 - Per-game profiles: auto-snap to the gaming zone and auto-borderless by exe on launch.
 - Multiple gaming zones.
 - On-screen drag-to-edit canvas (FancyZones-style full-screen editor).
+- Overlapping zones: let the editor place zones on top of each other, then show the "Overlapping zones" setting again
+  (`snapping.overlap`: smallest / largest / nearest centre wins). The rule already works in the tray app; only the
+  editor (which refuses overlaps) and the settings row are missing. Hidden from settings in 0.3.4.
 - Zones spanning monitors.
 - Code signing; release packaging.
 

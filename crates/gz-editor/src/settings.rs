@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use eframe::egui::{self, RichText, Vec2};
-use gz_core::config::{HotkeyName, Overlap, SETTINGS_FILE};
+use gz_core::config::{HotkeyName, SETTINGS_FILE};
 use gz_core::{Capture, Captured, Color, DisabledZones, GamingFit, Hotkey, LogLevel, Modifiers, Settings};
 use gz_win::hotkey as win_hotkey;
 use gz_win::startup::{self, Elevated};
@@ -491,17 +491,7 @@ impl SettingsWindow {
             ui.radio_value(&mut s.require_shift, true, "While Shift is held");
             ui.radio_value(&mut s.require_shift, false, "Always (hold Shift to hide them)");
         });
-        ui.horizontal(|ui| {
-            label_cell(ui, "Overlapping zones");
-            egui::ComboBox::from_id_salt("overlap").width(HOTKEY_W).selected_text(overlap_name(s.overlap)).show_ui(
-                ui,
-                |ui| {
-                    for o in [Overlap::Smallest, Overlap::Largest, Overlap::ClosestCentre] {
-                        ui.selectable_value(&mut s.overlap, o, overlap_name(o));
-                    }
-                },
-            );
-        });
+        // No "Overlapping zones" choice (`snapping.overlap`): the editor can't make zones overlap yet (PLAN.md backlog).
         ui.horizontal(|ui| {
             label_cell(ui, "Near a border");
             ui.checkbox(&mut s.edge_span, "Snap to both zones, within");
@@ -776,14 +766,6 @@ pub fn hotkey_label(name: HotkeyName) -> &'static str {
         HotkeyName::GamingSnap => "Snap to gaming zone",
         HotkeyName::DebugDump => "Window info to the log",
         HotkeyName::QuickSwitch => "Switch to layout 1-9",
-    }
-}
-
-fn overlap_name(o: Overlap) -> &'static str {
-    match o {
-        Overlap::Smallest => "The smallest one wins",
-        Overlap::Largest => "The largest one wins",
-        Overlap::ClosestCentre => "The nearest centre wins",
     }
 }
 

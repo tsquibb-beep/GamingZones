@@ -216,11 +216,9 @@ fn choices_and_numbers() {
     assert_eq!(written(&h).overlay.disabled_zones, gz_core::DisabledZones::Hidden);
     click(&mut h, "Centre it, keep its size");
     assert_eq!(written(&h).snapping.gaming_fit, gz_core::GamingFit::Centre);
-    // The first drop-down is the overlap rule (the second the log level).
-    h.get_all_by_role(egui::accesskit::Role::ComboBox).next().unwrap().click();
-    h.run_steps(2);
-    click(&mut h, "The nearest centre wins");
-    assert_eq!(written(&h).snapping.overlap, gz_core::Overlap::ClosestCentre);
+    // The overlap rule is hidden until zones can overlap: the only drop-down is the log level.
+    assert_eq!(h.get_all_by_role(egui::accesskit::Role::ComboBox).count(), 1);
+    assert!(h.query_by_label("Overlapping zones").is_none());
     click(&mut h, "Snap to both zones, within");
     assert!(written(&h).snapping.edge_span);
     click(&mut h, "Start it when I sign in");
