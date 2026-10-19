@@ -334,6 +334,32 @@ pub fn set_style(hwnd: Hwnd, style: u32) -> crate::Result<()> {
     }
 }
 
+/// Sets `GWL_STYLE` and `GWL_EXSTYLE`, then moves and sizes the window to `rect` in the same
+/// `SetWindowPos` that tells Windows the frame changed. With one call the client area goes
+/// straight to its new size, instead of first growing into the old frame (a game would see
+/// that as a resize). `WS_EX_TOPMOST` can't be changed this way; use [`set_topmost`].
+pub fn set_frame(hwnd: Hwnd, style: u32, ex_style: u32, rect: Rect) -> crate::Result<()> {
+    unsafe {
+        SetWindowLongPtrW(hwnd.raw(), GWL_STYLE, style as isize);
+        SetWindowLongPtrW(hwnd.raw(), GWL_EXSTYLE, ex_style as isize);
+        SetWindowPos(
+            hwnd.raw(),
+            None,
+            rect.left,
+            rect.top,
+            rect.width(),
+            rect.height(),
+            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+}
+
+/// Puts a window into (or takes it out of) the topmost band, without moving or activating it.
+pub fn set_topmost(hwnd: Hwnd, topmost: bool) -> crate::Result<()> {
+    let after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    unsafe { SetWindowPos(hwnd.raw(), Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) }
+}
+
 /// Moves and sizes a window to `rect` (window rect, screen coordinates, physical px).
 pub fn set_window_rect(hwnd: Hwnd, rect: Rect) -> crate::Result<()> {
     unsafe {
@@ -492,5 +518,49 @@ mod tests {
         assert_eq!(m.loword_wparam(), 2);
         assert_eq!(m.hiword_wparam(), 1);
         assert_eq!(m.loword_lparam(), 0x205);
+    }
+
+    struct Plain;
+    impl WindowHandler for Plain {
+        fn handle(&mut self, _: Hwnd, _: &Message) -> Option<isize> {
+            None
+        }
+    }
+
+    /// A real (never shown) window loses its frame and gets it back, and its rects follow.
+    #[test]
+    fn set_frame_removes_and_restores_the_border() {
+        use crate::inspect;
+        use crate::styles::ws;
+        let spec = WindowSpec {
+            class: "GamingZones.Test.Frame",
+            title: "frame test",
+            style: ws::OVERLAPPEDWINDOW,
+            ex_style: ws::EX_WINDOWEDGE,
+            rect: Some(Rect::from_xywh(100, 100, 640, 480)),
+            icon: false,
+            background: Background::None,
+        };
+        let hwnd = create_window(&spec, Box::new(Plain)).unwrap();
+        let (style, ex) = (super::style(hwnd), ex_style(hwnd));
+        let client = inspect::client_rect_screen(hwnd).unwrap();
+        assert_ne!(inspect::window_rect(hwnd).unwrap(), client);
+
+        let border = ws::CAPTION | ws::THICKFRAME | ws::SYSMENU | ws::MINIMIZEBOX | ws::MAXIMIZEBOX;
+        set_frame(hwnd, style & !border, ex & !ws::EX_WINDOWEDGE, client).unwrap();
+        assert_eq!(super::style(hwnd) & border, 0);
+        assert_eq!(inspect::window_rect(hwnd).unwrap(), client);
+        assert_eq!(inspect::client_rect_screen(hwnd).unwrap(), client);
+
+        let win = inspect::window_rect(hwnd).unwrap();
+        set_frame(hwnd, style, ex, win).unwrap();
+        assert_eq!((super::style(hwnd), ex_style(hwnd)), (style, ex));
+        assert!(inspect::client_rect_screen(hwnd).unwrap().width() < client.width());
+
+        set_topmost(hwnd, true).unwrap();
+        assert_ne!(ex_style(hwnd) & ws::EX_TOPMOST, 0);
+        set_topmost(hwnd, false).unwrap();
+        assert_eq!(ex_style(hwnd) & ws::EX_TOPMOST, 0);
+        destroy_window(hwnd).unwrap();
     }
 }

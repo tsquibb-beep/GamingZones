@@ -82,6 +82,7 @@ pub fn new_layout(id: &str, name: &str) -> Layout {
         name: name.into(),
         gaming_zones: Vec::new(),
         gaming_over_taskbar: false,
+        gaming_keep_on_top: false,
         guides: Vec::new(),
         zones: vec![Zone {
             left: AREA_LEFT.into(),
@@ -1131,6 +1132,7 @@ fn remove_gaming_zone_absorbing(layout: &mut Layout, absorb: u8, area: Rect, mon
     }
     layout.gaming_zones.clear();
     layout.gaming_over_taskbar = false;
+    layout.gaming_keep_on_top = false;
     remove_unused_guides(layout);
     Ok(())
 }

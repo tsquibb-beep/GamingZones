@@ -1,19 +1,25 @@
 # GamingZones
 
 A lightweight window manager for Windows, in the style of PowerToys FancyZones, with an optional
-**gaming zone**: a zone sized to an exact game resolution that the other zones arrange around.
-A hotkey to remove and restore a game window's border is planned.
+**gaming zone**: a zone sized to an exact game resolution that the other zones arrange around, and a
+hotkey that removes and restores a game window's border.
 
-**Status: early development.** Zones with Shift-drag snapping, the gaming zone and the layout editor work
-(phases 0 to 3). The layout selector, quick-switch hotkeys and settings window come next. See [PLAN.md](PLAN.md)
+**Status: early development.** Phases 0 to 5 are built: Shift-drag snapping, the gaming zone, the layout editor,
+the layout selector and quick-switch hotkeys, the settings window and the borderless toggle. See [PLAN.md](PLAN.md)
 for the scope and phase order.
 
 ## What's here now
 
 - `gamingzones.exe`: tray app. Hold Shift while dragging a window to see the zones and drop it into one.
-  A hotkey snaps the foreground window to the gaming zone. Settings and layouts live in `%APPDATA%\GamingZones\`.
+  Settings and layouts live in `%APPDATA%\GamingZones\`. Default hotkeys:
+  - `Win+Ctrl+Alt+G`: snap the foreground window to the gaming zone.
+  - `Win+Ctrl+Alt+B`: remove the border of the window in the gaming zone, or put it back. If the game puts
+    its border back, it's removed again.
+  - ``Win+Shift+` ``: layout selector. `Win+Ctrl+Alt+1`..`9`: switch layout.
+  - `Win+Ctrl+Alt+I`: write the foreground window's details to the log.
 - `gz-editor.exe`: layout editor, opened from the tray menu. Split, merge and resize zones, type exact sizes,
-  lock zones, and turn a zone into a gaming zone of an exact resolution.
+  lock zones, and turn a zone into a gaming zone of an exact resolution. `gz-editor.exe --settings` (also
+  in the tray menu) changes the hotkeys and other settings.
 - `ruler.exe`: test window that shows its own client size, window rect, DWM frame bounds and DPI in physical
   pixels. It can set an exact client size and toggle a fixed (non-resizable) frame.
 

@@ -18,12 +18,21 @@ pub struct MonitorZones {
     pub dpi: u32,
     pub layout_name: String,
     pub zones: Vec<ResolvedZone>,
+    /// The layout keeps a window in its gaming zone on top (`gaming_keep_on_top`).
+    pub keep_on_top: bool,
 }
 
 impl MonitorZones {
     /// The first gaming zone (index into `zones`), if the layout has one.
     pub fn gaming_zone(&self) -> Option<usize> {
         self.zones.iter().position(|z| z.gaming && !z.disabled)
+    }
+
+    /// A window snapped to zone `i` is made topmost: it's the gaming zone of a layout with
+    /// `gaming_keep_on_top`, and it really covers part of the taskbar.
+    pub fn keeps_on_top(&self, i: usize) -> bool {
+        let z = &self.zones[i];
+        self.keep_on_top && z.gaming && self.work.union(&z.rect) != self.work
     }
 
     /// What the overlay must cover: the work area, plus a gaming zone over the taskbar.
@@ -172,6 +181,7 @@ impl ZoneConfig {
                 dpi: m.dpi,
                 layout_name: layout.name.clone(),
                 zones,
+                keep_on_top: layout.gaming_over_taskbar && layout.gaming_keep_on_top,
             }),
             Err(e) => {
                 // validate() ran at load, so this shouldn't happen.

@@ -81,6 +81,7 @@ impl Editor {
         };
         ui.heading("Gaming zone");
         let over_taskbar = self.current().gaming_over_taskbar;
+        let keep_on_top = self.current().gaming_keep_on_top;
         let bounds = self.current().gaming_bounds(work, monitor);
         let space = edit::gaming_space(self.current(), work, monitor).ok().flatten();
         let placed = self.current().gaming_rects(work, monitor).ok().and_then(|r| r.first().copied());
@@ -231,13 +232,26 @@ impl Editor {
         let mut over = over_taskbar;
         if ui
             .checkbox(&mut over, "May cover the taskbar")
-            .on_hover_text(
-                "Lets it be taller or wider than the work area. The taskbar still draws on top of it for now.",
-            )
+            .on_hover_text("Lets it be taller or wider than the work area.")
             .changed()
         {
             self.edit_layout("", |l, _, _| {
                 l.gaming_over_taskbar = over;
+                l.gaming_keep_on_top &= over;
+                Ok(())
+            });
+        }
+        let mut on_top = keep_on_top;
+        if ui
+            .add_enabled(over_taskbar, egui::Checkbox::new(&mut on_top, "Keep the game on top"))
+            .on_hover_text(
+                "Otherwise the taskbar draws over the part of the game that covers it. \
+                 A game on top also covers other windows that overlap it.",
+            )
+            .changed()
+        {
+            self.edit_layout("", |l, _, _| {
+                l.gaming_keep_on_top = on_top;
                 Ok(())
             });
         }

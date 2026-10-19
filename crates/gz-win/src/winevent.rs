@@ -18,6 +18,7 @@ use crate::Hwnd;
 /// Event ids (WinUser.h).
 pub mod event {
     use windows::Win32::UI::WindowsAndMessaging as wm;
+    pub const SYSTEM_FOREGROUND: u32 = wm::EVENT_SYSTEM_FOREGROUND;
     pub const MOVESIZESTART: u32 = wm::EVENT_SYSTEM_MOVESIZESTART;
     pub const MOVESIZEEND: u32 = wm::EVENT_SYSTEM_MOVESIZEEND;
     pub const OBJECT_DESTROY: u32 = wm::EVENT_OBJECT_DESTROY;

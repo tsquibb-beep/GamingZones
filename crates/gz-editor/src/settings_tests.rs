@@ -21,7 +21,7 @@ const TAB: u16 = 0x09;
 fn harness(settings: Settings) -> Harness<'static, SettingsWindow> {
     let window = SettingsWindow::for_test(settings);
     let mut fonts_set = false;
-    let mut h = Harness::builder().with_size(Vec2::new(760.0, 1600.0)).with_step_dt(0.05).build_ui_state(
+    let mut h = Harness::builder().with_size(Vec2::new(760.0, 2000.0)).with_step_dt(0.05).build_ui_state(
         move |ui, w: &mut SettingsWindow| {
             if !std::mem::replace(&mut fonts_set, true) {
                 style::install(ui.ctx());
@@ -110,7 +110,7 @@ fn turning_hotkeys_off() {
     let mut h = harness(Settings::default());
     // The × after the gaming snap box (the second hotkey row).
     let crosses: Vec<_> = h.get_all_by_label("×").collect();
-    assert_eq!(crosses.len(), 3);
+    assert_eq!(crosses.len(), 4);
     crosses[1].click();
     h.run_steps(2);
     assert_eq!(written(&h).hotkeys.gaming_snap, None);
@@ -207,6 +207,18 @@ fn type_exclusion(h: &mut Harness<'_, SettingsWindow>, text: &str) {
     type_into(h, usize::MAX, text);
 }
 
+/// The borderless re-check list's box is the one before the exclusion box.
+fn type_recheck(h: &mut Harness<'_, SettingsWindow>, text: &str) {
+    let count = h.get_all_by_role(egui::accesskit::Role::TextInput).count();
+    type_into(h, count - 2, text);
+}
+
+/// The `n`th button labelled "Add" (0: the re-check list's, 1: the exclusion list's).
+fn click_add(h: &mut Harness<'_, SettingsWindow>, n: usize) {
+    h.get_all_by_label("Add").nth(n).unwrap().click();
+    h.run_steps(2);
+}
+
 #[test]
 fn typing_a_colour() {
     let mut h = harness(Settings::default());
@@ -226,18 +238,39 @@ fn typing_a_colour() {
 #[test]
 fn excluded_apps() {
     let mut h = harness(Settings::default());
-    h.get_by_label("None.");
+    assert_eq!(h.get_all_by_label("None.").count(), 2, "the re-check list and this one");
     type_exclusion(&mut h, "Game.exe");
-    click(&mut h, "Add");
+    click_add(&mut h, 1);
     assert_eq!(written(&h).snapping.excluded_apps, ["Game.exe"]);
     // Twice (any case) is once.
     type_exclusion(&mut h, "game.EXE");
-    click(&mut h, "Add");
+    click_add(&mut h, 1);
     assert_eq!(written(&h).snapping.excluded_apps, ["Game.exe"]);
-    // The × of the first app is the fourth (after three hotkeys).
-    h.get_all_by_label("×").nth(3).unwrap().click();
+    assert!(written(&h).borderless.recheck_apps.is_empty());
+    // The × of the first app is the fifth (after four hotkeys).
+    h.get_all_by_label("×").nth(4).unwrap().click();
     h.run_steps(2);
     assert!(written(&h).snapping.excluded_apps.is_empty());
+}
+
+#[test]
+fn borderless_hotkey_and_recheck_apps() {
+    let mut h = harness(Settings::default());
+    h.get_by_label("Borderless on/off");
+    click(&mut h, "Win+Ctrl+Alt+B");
+    assert_eq!(h.state().is_capturing(), Some(HotkeyName::Borderless));
+    press(&mut h, &[LWIN, LCTRL, LALT, 0x4E]); // N
+    assert_eq!(written(&h).hotkeys.borderless, hk("Win+Ctrl+Alt+N"));
+
+    type_recheck(&mut h, "Stubborn.exe");
+    click_add(&mut h, 0);
+    let s = written(&h);
+    assert_eq!(s.borderless.recheck_apps, ["Stubborn.exe"]);
+    assert!(s.snapping.excluded_apps.is_empty());
+    // Its × comes after the four hotkeys'.
+    h.get_all_by_label("×").nth(4).unwrap().click();
+    h.run_steps(2);
+    assert!(written(&h).borderless.recheck_apps.is_empty());
 }
 
 #[test]

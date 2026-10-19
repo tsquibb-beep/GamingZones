@@ -31,6 +31,8 @@ pub struct DropTarget {
     pub label: String,
     /// The gaming zone on its own: fit the client area, not the frame.
     pub gaming: bool,
+    /// Make the window topmost ([`MonitorZones::keeps_on_top`]).
+    pub keep_on_top: bool,
 }
 
 pub struct Drag {
@@ -221,7 +223,8 @@ impl Drag {
         let rect = layout::bounding_rect(&mz.zones, &self.selected)?;
         let label = self.selected.iter().map(|&i| zone_label(&mz.zones, i)).collect::<Vec<_>>().join("+");
         let gaming = matches!(self.selected[..], [i] if mz.zones[i].gaming);
-        Some(DropTarget { rect, label, gaming })
+        let keep_on_top = matches!(self.selected[..], [i] if mz.keeps_on_top(i));
+        Some(DropTarget { rect, label, gaming, keep_on_top })
     }
 }
 

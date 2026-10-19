@@ -28,6 +28,7 @@ pub struct Settings {
     pub hotkeys: Hotkeys,
     pub snapping: Snapping,
     pub overlay: Overlay,
+    pub borderless: Borderless,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +181,8 @@ pub struct Hotkeys {
     pub gaming_snap: Option<Hotkey>,
     /// Opens the layout selector on the monitor with the foreground window.
     pub layout_selector: Option<Hotkey>,
+    /// Removes (or puts back) the border of the window in the gaming zone.
+    pub borderless: Option<Hotkey>,
     /// These modifiers with 1..9 apply layout 1..9 (the editor's list order) to the
     /// monitor with the foreground window.
     pub quick_switch: Option<Modifiers>,
@@ -191,8 +194,38 @@ impl Default for Hotkeys {
             debug_dump: Some(builtin("Win+Ctrl+Alt+I")),
             gaming_snap: Some(builtin("Win+Ctrl+Alt+G")),
             layout_selector: Some(builtin("Win+Shift+`")),
+            borderless: Some(builtin("Win+Ctrl+Alt+B")),
             quick_switch: Some(Modifiers { win: true, ctrl: true, alt: true, shift: false }),
         }
+    }
+}
+
+/// The borderless toggle's optional slow re-check, for games that put their border back
+/// without any window event. Its timer runs only while a window of a listed exe is borderless.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Borderless {
+    /// Exe file names (any case) whose borderless windows are re-checked every `recheck_ms`.
+    pub recheck_apps: Vec<String>,
+    pub recheck_ms: u32,
+}
+
+impl Default for Borderless {
+    fn default() -> Self {
+        Self { recheck_apps: Vec::new(), recheck_ms: 2000 }
+    }
+}
+
+impl Borderless {
+    /// Shortest re-check interval (a setting below it is raised to it).
+    pub const MIN_RECHECK_MS: u32 = 250;
+
+    pub fn rechecks(&self, exe_name: &str) -> bool {
+        self.recheck_apps.iter().any(|e| e.trim().eq_ignore_ascii_case(exe_name))
+    }
+
+    pub fn interval_ms(&self) -> u32 {
+        self.recheck_ms.max(Self::MIN_RECHECK_MS)
     }
 }
 
@@ -204,10 +237,12 @@ pub enum HotkeyName {
     GamingSnap,
     LayoutSelector,
     QuickSwitch,
+    Borderless,
 }
 
 impl HotkeyName {
-    pub const ALL: [HotkeyName; 4] = [Self::DebugDump, Self::GamingSnap, Self::LayoutSelector, Self::QuickSwitch];
+    pub const ALL: [HotkeyName; 5] =
+        [Self::DebugDump, Self::GamingSnap, Self::LayoutSelector, Self::QuickSwitch, Self::Borderless];
 
     /// The key in settings.json.
     pub const fn key(self) -> &'static str {
@@ -216,6 +251,7 @@ impl HotkeyName {
             Self::GamingSnap => "gaming_snap",
             Self::LayoutSelector => "layout_selector",
             Self::QuickSwitch => "quick_switch",
+            Self::Borderless => "borderless",
         }
     }
 
@@ -235,6 +271,7 @@ impl Hotkeys {
             (HotkeyName::DebugDump, self.debug_dump),
             (HotkeyName::GamingSnap, self.gaming_snap),
             (HotkeyName::LayoutSelector, self.layout_selector),
+            (HotkeyName::Borderless, self.borderless),
         ];
         for (name, hotkey) in single {
             out.extend(hotkey.map(|h| (name, h)));
@@ -355,6 +392,8 @@ mod tests {
         assert_eq!(s.hotkeys.gaming_snap.unwrap().to_string(), "Win+Ctrl+Alt+G");
         assert_eq!(s.hotkeys.layout_selector.unwrap().to_string(), "Win+Shift+`");
         assert_eq!(s.hotkeys.quick_switch.unwrap().to_string(), "Win+Ctrl+Alt");
+        assert_eq!(s.hotkeys.borderless.unwrap().to_string(), "Win+Ctrl+Alt+B");
+        assert!(s.borderless.recheck_apps.is_empty());
         assert!(s.snapping.require_shift && s.overlay.flash_on_switch);
         assert_eq!(s.snapping.overlap, Overlap::Smallest);
         assert!(s.hotkeys.clashes().is_empty());
@@ -381,9 +420,10 @@ mod tests {
     fn hotkey_bindings_and_clashes() {
         let mut h = Hotkeys::default();
         let all = h.bindings();
-        assert_eq!(all.len(), 12);
-        assert_eq!(all[3], (HotkeyName::QuickSwitch, "Win+Ctrl+Alt+1".parse().unwrap()));
-        assert_eq!(all[11].1.to_string(), "Win+Ctrl+Alt+9");
+        assert_eq!(all.len(), 13);
+        assert_eq!(all[3].0, HotkeyName::Borderless);
+        assert_eq!(all[4], (HotkeyName::QuickSwitch, "Win+Ctrl+Alt+1".parse().unwrap()));
+        assert_eq!(all[12].1.to_string(), "Win+Ctrl+Alt+9");
 
         h.gaming_snap = Some("Win+Ctrl+Alt+5".parse().unwrap());
         assert_eq!(h.clashes(), [(HotkeyName::GamingSnap, HotkeyName::QuickSwitch)]);
@@ -393,9 +433,19 @@ mod tests {
             [(HotkeyName::DebugDump, HotkeyName::GamingSnap), (HotkeyName::DebugDump, HotkeyName::QuickSwitch)]
         );
         h.quick_switch = None;
+        h.borderless = None;
         assert_eq!(h.bindings().len(), 3);
         assert_eq!(h.clashes(), [(HotkeyName::DebugDump, HotkeyName::GamingSnap)]);
-        assert_eq!(HotkeyName::ALL.map(HotkeyName::bit), [1, 2, 4, 8]);
+        assert_eq!(HotkeyName::ALL.map(HotkeyName::bit), [1, 2, 4, 8, 16]);
+    }
+
+    #[test]
+    fn borderless_settings() {
+        let s =
+            Settings::from_json(r#"{ "borderless": { "recheck_apps": [" Game.EXE "], "recheck_ms": 10 } }"#).unwrap();
+        assert!(s.borderless.rechecks("game.exe") && !s.borderless.rechecks("other.exe"));
+        assert_eq!(s.borderless.interval_ms(), Borderless::MIN_RECHECK_MS);
+        assert_eq!(Settings::default().borderless.interval_ms(), 2000);
     }
 
     #[test]
@@ -453,7 +503,11 @@ mod tests {
     fn a_byte_order_mark_is_fine() {
         let s = Settings::from_json("\u{feff}{ \"log_level\": \"warn\" }").unwrap();
         assert_eq!(s.log_level, LogLevel::Warn);
-        assert!(crate::store::LayoutsFile::from_json(&format!("\u{feff}{}", crate::store::LayoutsFile::defaults().to_json())).is_ok());
+        assert!(crate::store::LayoutsFile::from_json(&format!(
+            "\u{feff}{}",
+            crate::store::LayoutsFile::defaults().to_json()
+        ))
+        .is_ok());
         assert!(crate::store::Applied::from_json("\u{feff}{}").is_ok());
     }
 

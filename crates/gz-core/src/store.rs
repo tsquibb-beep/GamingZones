@@ -47,7 +47,8 @@ impl LayoutsFile {
 
     /// Parses and validates every layout.
     pub fn from_json(json: &str) -> Result<LayoutsFile, LayoutsError> {
-        let file: LayoutsFile = serde_json::from_str(crate::config::without_bom(json)).map_err(|e| LayoutsError::Config(ConfigError::Json(e)))?;
+        let file: LayoutsFile = serde_json::from_str(crate::config::without_bom(json))
+            .map_err(|e| LayoutsError::Config(ConfigError::Json(e)))?;
         let mut ids = HashSet::new();
         for layout in &file.layouts {
             if !ids.insert(layout.id.as_str()) {
@@ -90,6 +91,9 @@ impl LayoutsFile {
             let mut fields = vec![format!("\"id\": {}", inline(&l.id)), format!("\"name\": {}", inline(&l.name))];
             if l.gaming_over_taskbar {
                 fields.push("\"gaming_over_taskbar\": true".into());
+            }
+            if l.gaming_keep_on_top {
+                fields.push("\"gaming_keep_on_top\": true".into());
             }
             if !l.gaming_zones.is_empty() {
                 fields.push(format!("\"gaming_zones\": {}", lines(&l.gaming_zones)));
@@ -333,6 +337,7 @@ mod tests {
         let mut file = LayoutsFile::defaults();
         file.layouts[0].name = "Quote \" comma, {brace}: 1.0".into();
         file.layouts[0].gaming_over_taskbar = true;
+        file.layouts[0].gaming_keep_on_top = true;
         file.layouts[1].guides[0].anchor = crate::layout::Anchor::Percent(0.05);
         let again = LayoutsFile::from_json(&file.to_json()).unwrap();
         assert_eq!(again, file);

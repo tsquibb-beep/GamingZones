@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod borderless;
 mod drag;
 mod dump;
 mod logger;

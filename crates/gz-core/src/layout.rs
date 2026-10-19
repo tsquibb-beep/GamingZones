@@ -79,6 +79,10 @@ pub struct Layout {
     /// the work area). Other zones always stay in the work area.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gaming_over_taskbar: bool,
+    /// A window snapped to a gaming zone that covers the taskbar is made topmost, so the
+    /// taskbar (itself topmost) doesn't draw over it. Only used with `gaming_over_taskbar`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gaming_keep_on_top: bool,
     #[serde(default)]
     pub guides: Vec<Guide>,
     #[serde(default)]
@@ -557,7 +561,15 @@ mod tests {
     }
 
     fn layout(guides: Vec<Guide>, zones: Vec<Zone>) -> Layout {
-        Layout { id: "t".into(), name: "Test".into(), gaming_zones: vec![], gaming_over_taskbar: false, guides, zones }
+        Layout {
+            id: "t".into(),
+            name: "Test".into(),
+            gaming_zones: vec![],
+            gaming_over_taskbar: false,
+            gaming_keep_on_top: false,
+            guides,
+            zones,
+        }
     }
 
     fn rz(l: i32, t: i32, r: i32, b: i32) -> ResolvedZone {

@@ -4,7 +4,8 @@
 //! GetMessageW, so the app uses no CPU while idle. The only hook that exists while no
 //! window is being dragged is the move/size WinEvent hook, which Windows calls only when a
 //! drag starts or ends. (And a keyboard hook while a settings window hotkey box asks for
-//! one: see [`ipc::CAPTURE_MESSAGE`].)
+//! one: see [`ipc::CAPTURE_MESSAGE`]; and three hooks on each window whose border we
+//! removed: see [`crate::borderless`].)
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use gz_win::window::{self, msg, Background, Message, WindowHandler, WindowSpec};
 use gz_win::winevent::{self, event, Delivery, Filter, WinEventHook};
 use gz_win::{hotkey, input, inspect, ipc as win_ipc, process, styles::ws, Hwnd};
 
+use crate::borderless::{Borderless, Outcome, Toggled};
 use crate::drag::{Drag, DragMessages, DropTarget};
 use crate::overlay::Overlay;
 use crate::preview::Preview;
@@ -41,6 +43,8 @@ const WM_DRAG_KEY: u32 = msg::APP + 5;
 const WM_PREVIEW_CLOSED: u32 = msg::APP + 6;
 /// The layout selector closed: wParam = chosen card or `selector::CANCELLED`.
 const WM_SELECTOR_DONE: u32 = msg::APP + 7;
+/// From a borderless window's hooks: wParam = event, lParam = window.
+const WM_BORDERLESS: u32 = msg::APP + 8;
 
 const DRAG_MESSAGES: DragMessages =
     DragMessages { location: WM_DRAG_LOCATION, destroy: WM_DRAG_DESTROY, key: WM_DRAG_KEY };
@@ -54,6 +58,7 @@ const CMD_EXIT: u32 = 4;
 const HOTKEY_DEBUG_DUMP: i32 = 1;
 const HOTKEY_GAMING_SNAP: i32 = 2;
 const HOTKEY_LAYOUT_SELECTOR: i32 = 3;
+const HOTKEY_BORDERLESS: i32 = 4;
 /// Quick-switch: this + 1..9 for layouts 1..9.
 const HOTKEY_QUICK_SWITCH: i32 = 10;
 
@@ -63,6 +68,8 @@ const FLASH_MS: u32 = 600;
 /// `WM_TIMER` id: a hotkey capture nobody stopped ends anyway.
 const TIMER_CAPTURE: usize = 2;
 const CAPTURE_MAX_MS: u32 = 30_000;
+/// `WM_TIMER` id: re-check borderless windows of `borderless.recheck_apps`.
+const TIMER_RECHECK: usize = 3;
 
 pub struct App {
     config_dir: PathBuf,
@@ -86,10 +93,18 @@ pub struct App {
     selector: Option<Selector>,
     /// Keys for a settings window hotkey box.
     capture: Option<CaptureHook>,
+    borderless: Borderless,
+    /// The re-check timer's interval while it runs.
+    recheck_ms: Option<u32>,
+    /// The last window snapped to a gaming zone, and its process id.
+    last_gaming: Option<(Hwnd, u32)>,
+    /// The window we made topmost (keep-on-top), and its process id.
+    on_top: Option<(Hwnd, u32)>,
 }
 
 /// Creates the hidden window; the app lives in its handler until the window is destroyed.
 pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
+    let borderless = Borderless::new(&config_dir, WM_BORDERLESS);
     let app = App {
         config_dir,
         settings: Settings::default(),
@@ -108,6 +123,10 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
         flash: None,
         selector: None,
         capture: None,
+        borderless,
+        recheck_ms: None,
+        last_gaming: None,
+        on_top: None,
     };
     // A hidden top-level window rather than a message-only one: only top-level windows get
     // the TaskbarCreated and WM_DISPLAYCHANGE broadcasts.
@@ -137,6 +156,8 @@ impl App {
             Err(e) => log::error!("Could not add the tray icon: {}", e.message()),
         }
         self.reload(hwnd, false);
+        self.borderless.load(hwnd);
+        self.update_recheck(hwnd);
         // Windows calls this hook only when a window drag/resize starts or ends.
         match WinEventHook::new(
             event::MOVESIZESTART,
@@ -183,6 +204,7 @@ impl App {
         if !errors.is_empty() {
             self.notify("Layout files have an error", &format!("{}\nDetails are in the log.", errors.join("\n")));
         }
+        self.update_recheck(hwnd);
         failed
     }
 
@@ -199,6 +221,7 @@ impl App {
                 HotkeyName::GamingSnap => keys.gaming_snap.is_none(),
                 HotkeyName::LayoutSelector => keys.layout_selector.is_none(),
                 HotkeyName::QuickSwitch => keys.quick_switch.is_none(),
+                HotkeyName::Borderless => keys.borderless.is_none(),
             };
             if off {
                 log::info!("Hotkey {} is disabled", name.key());
@@ -424,7 +447,12 @@ impl App {
             log::debug!("Gaming snap: restoring maximised {} first", target.exe);
             window::restore(window);
         }
-        let drop = DropTarget { rect: mz.zones[i].rect, label: format!("G on {}", mz.device), gaming: true };
+        let drop = DropTarget {
+            rect: mz.zones[i].rect,
+            label: format!("G on {}", mz.device),
+            gaming: true,
+            keep_on_top: mz.keeps_on_top(i),
+        };
         self.snap(window, &target.exe, &drop);
     }
 
@@ -448,6 +476,7 @@ impl App {
             (snap::snap_frame(window, target.rect), "frame")
         };
         let zone = &target.label;
+        let ok = result.is_ok();
         match result {
             Ok(s) if s.exact() => {
                 log::info!("Snapped {exe} to zone {zone}: {what} {} (passes: {})", s.actual, s.passes)
@@ -462,6 +491,150 @@ impl App {
                 if self.warned.insert(window) {
                     self.notify("Couldn't snap this window", &format!("{exe}: {e}"));
                 }
+            }
+        }
+        if ok {
+            self.snapped(window, exe, target);
+        }
+    }
+
+    /// After a snap: remember a gaming-zone window, keep it on top if its layout says so,
+    /// and tell the borderless watch where a borderless window is now.
+    fn snapped(&mut self, window: Hwnd, exe: &str, target: &DropTarget) {
+        let pid = process::window_pid(window);
+        if target.gaming {
+            self.last_gaming = Some((window, pid));
+        }
+        self.borderless.moved(window);
+        let ours = self.on_top.is_some_and(|(w, _)| w == window);
+        if target.keep_on_top && !ours {
+            self.stop_keeping_on_top();
+            if window::ex_style(window) & ws::EX_TOPMOST != 0 {
+                log::debug!("{exe} is topmost already");
+            } else if let Err(e) = window::set_topmost(window, true) {
+                log::warn!("Could not keep {exe} on top: {}", e.message());
+            } else {
+                log::info!("Keeping {exe} on top: its gaming zone covers the taskbar");
+                self.on_top = Some((window, pid));
+            }
+        } else if !target.keep_on_top && ours {
+            self.stop_keeping_on_top();
+        }
+    }
+
+    /// Takes the window we made topmost out of the topmost band again.
+    fn stop_keeping_on_top(&mut self) {
+        let Some((w, pid)) = self.on_top.take() else { return };
+        if !inspect::exists(w) || process::window_pid(w) != pid {
+            return;
+        }
+        match window::set_topmost(w, false) {
+            Ok(()) => log::info!("Window {w} is no longer kept on top"),
+            Err(e) => log::warn!("Could not take window {w} off the top: {}", e.message()),
+        }
+    }
+
+    /// The borderless hotkey: removes or puts back the border of the window in the gaming zone.
+    fn toggle_borderless(&mut self, hwnd: Hwnd) {
+        let Some(window) = self.borderless_target() else {
+            log::info!("Borderless: no window in a gaming zone");
+            self.notify("No window in the gaming zone", "Snap a window to the gaming zone first.");
+            return;
+        };
+        // Putting back a border we removed is always allowed (even if the app was excluded since).
+        let check = if self.borderless.is_borderless(window) {
+            let path = process::exe_path(process::window_pid(window)).unwrap_or_default();
+            Ok(snap::Target { exe: process::file_name(&path).to_string(), elevated: false })
+        } else {
+            snap::check(window, &self.settings.snapping, self.self_elevated, Picked::Hotkey)
+        };
+        let exe = match check {
+            Ok(t) if t.elevated => {
+                log::warn!("Borderless: {} runs as administrator and GamingZones doesn't", t.exe);
+                self.notify(
+                    "Can't change this window",
+                    &format!("{} runs as administrator. Run GamingZones as administrator to change it.", t.exe),
+                );
+                return;
+            }
+            Ok(t) => t.exe,
+            Err(skip) => {
+                log::info!("Borderless: window {window} left alone: {skip}");
+                return;
+            }
+        };
+        if inspect::is_maximized(window) && !self.borderless.is_borderless(window) {
+            log::debug!("Borderless: restoring maximised {exe} first");
+            window::restore(window);
+        }
+        match self.borderless.toggle(hwnd, window, &exe) {
+            Ok(Toggled::Removed(s)) => log_toggle(&exe, "Removed the border of", &s),
+            Ok(Toggled::Restored(s)) => {
+                log_toggle(&exe, "Put back the border of", &s);
+                log::debug!("WinEvent hooks left: {} (1 = the move/size hook)", WinEventHook::live_count());
+                if self.on_top.is_some_and(|(w, _)| w == window) {
+                    self.stop_keeping_on_top();
+                }
+            }
+            Err(e) => {
+                log::warn!("Borderless: {exe}: {e}");
+                self.notify("Couldn't change the border", &format!("{exe}: {e}"));
+            }
+        }
+        self.update_recheck(hwnd);
+    }
+
+    /// The foreground window if it's borderless (by us) or in a gaming zone; otherwise the
+    /// last window snapped to a gaming zone, if it's still there.
+    fn borderless_target(&self) -> Option<Hwnd> {
+        if let Some(w) = inspect::foreground_window() {
+            if self.borderless.is_borderless(w) || self.in_gaming_zone(w) {
+                return Some(w);
+            }
+        }
+        let (w, pid) = self.last_gaming?;
+        (inspect::exists(w) && process::window_pid(w) == pid).then_some(w)
+    }
+
+    /// The window's client area lies inside a gaming zone on its monitor.
+    fn in_gaming_zone(&self, window: Hwnd) -> bool {
+        let Ok(client) = inspect::client_rect_screen(window) else { return false };
+        let Some(m) = monitor::for_window(window) else { return false };
+        let Some(mz) = self.zones.for_monitor(&m, &MonitorIds::query(), self.settings.snapping.deadzone_px) else {
+            return false;
+        };
+        !client.is_empty() && mz.zones.iter().any(|z| z.gaming && !z.disabled && z.rect.union(&client) == z.rect)
+    }
+
+    fn on_borderless(&mut self, hwnd: Hwnd, outcome: Outcome) {
+        if let Outcome::GaveUp(exe) = outcome {
+            self.notify(
+                "Borderless: leaving it alone",
+                &format!("{exe} keeps putting its border back. The hotkey still puts its original border back."),
+            );
+        }
+        self.update_recheck(hwnd);
+    }
+
+    /// Starts, restarts or stops the re-check timer to match the borderless windows and settings.
+    fn update_recheck(&mut self, hwnd: Hwnd) {
+        let settings = &self.settings.borderless;
+        let want = self.borderless.wants_recheck(settings).then(|| settings.interval_ms());
+        if want == self.recheck_ms {
+            return;
+        }
+        match want {
+            Some(ms) => match window::set_timer(hwnd, TIMER_RECHECK, ms) {
+                Ok(()) => {
+                    log::debug!("Borderless: re-checking every {ms} ms");
+                    self.recheck_ms = Some(ms);
+                }
+                Err(e) => log::warn!("Could not start the borderless re-check: {}", e.message()),
+            },
+            None => {
+                window::kill_timer(hwnd, TIMER_RECHECK);
+                log::debug!("Borderless: re-check stopped");
+                self.recheck_ms = None;
             }
         }
     }
@@ -554,6 +727,7 @@ impl App {
     }
 
     fn on_destroy(&mut self, hwnd: Hwnd) {
+        window::kill_timer(hwnd, TIMER_RECHECK);
         self.drag = None;
         self.flash = None;
         self.selector = None;
@@ -618,6 +792,7 @@ impl WindowHandler for App {
                 HOTKEY_DEBUG_DUMP => dump::log_foreground_window(),
                 HOTKEY_GAMING_SNAP => self.snap_to_gaming_zone(),
                 HOTKEY_LAYOUT_SELECTOR => self.toggle_selector(hwnd),
+                HOTKEY_BORDERLESS => self.toggle_borderless(hwnd),
                 id if (HOTKEY_QUICK_SWITCH + 1..=HOTKEY_QUICK_SWITCH + 9).contains(&id) => {
                     self.quick_switch((id - HOTKEY_QUICK_SWITCH - 1) as usize, hwnd)
                 }
@@ -633,6 +808,17 @@ impl WindowHandler for App {
                 if self.capture.take().is_some() {
                     log::debug!("Hotkey capture timed out");
                 }
+            }
+            msg::TIMER if m.wparam == TIMER_RECHECK => {
+                let outcomes = self.borderless.recheck(&self.settings.borderless);
+                for o in outcomes {
+                    self.on_borderless(hwnd, o);
+                }
+                self.update_recheck(hwnd);
+            }
+            WM_BORDERLESS => {
+                let outcome = self.borderless.on_event(m);
+                self.on_borderless(hwnd, outcome);
             }
             WM_MOVESIZE => self.on_move_size(hwnd, m),
             WM_DRAG_LOCATION => {
@@ -696,6 +882,7 @@ fn hotkey_id(name: HotkeyName, hotkey: &Hotkey) -> i32 {
         HotkeyName::DebugDump => HOTKEY_DEBUG_DUMP,
         HotkeyName::GamingSnap => HOTKEY_GAMING_SNAP,
         HotkeyName::LayoutSelector => HOTKEY_LAYOUT_SELECTOR,
+        HotkeyName::Borderless => HOTKEY_BORDERLESS,
         HotkeyName::QuickSwitch => HOTKEY_QUICK_SWITCH + (hotkey.vk - DIGIT_KEYS.start() + 1) as i32,
     }
 }
@@ -709,4 +896,12 @@ fn target_monitor() -> Option<MonitorInfo> {
         let (x, y) = input::cursor_pos()?;
         monitor::from_point(x, y)
     })
+}
+
+fn log_toggle(exe: &str, what: &str, s: &snap::Snapped) {
+    if s.exact() {
+        log::info!("{what} {exe}: client {} (passes: {})", s.actual, s.passes);
+    } else {
+        log::warn!("{what} {exe}, but its client is {} instead of {} (the app limits its size?)", s.actual, s.target);
+    }
 }

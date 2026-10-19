@@ -17,8 +17,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, PeekMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, SetTimer,
-    SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_UP, MSG, PM_NOREMOVE, WH_KEYBOARD_LL,
-    WM_APP, WM_TIMER,
+    SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_UP, MSG, PM_NOREMOVE,
+    WH_KEYBOARD_LL, WM_APP, WM_TIMER,
 };
 
 use crate::Hwnd;
@@ -179,7 +179,8 @@ fn capture_thread(state: CaptureState, ready: mpsc::Sender<crate::Result<u32>>) 
     let handle = unsafe {
         // Make the message queue now, so WM_FINISH can't be posted before it exists.
         let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-        GetModuleHandleW(None).and_then(|m| SetWindowsHookExW(WH_KEYBOARD_LL, Some(capture_callback), Some(m.into()), 0))
+        GetModuleHandleW(None)
+            .and_then(|m| SetWindowsHookExW(WH_KEYBOARD_LL, Some(capture_callback), Some(m.into()), 0))
     };
     let handle = match handle {
         Ok(h) => h,

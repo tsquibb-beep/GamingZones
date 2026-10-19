@@ -355,28 +355,55 @@ Follow-ups (2026-10-19): the overlap rule is hidden from settings (0.3.4, see Ph
 - [ ] After that reboot: layouts, the applied layout per monitor and the settings are as they were.
 
 ### Phase 5 — Borderless toggle
-- [ ] Hotkey (default `Win+Ctrl+Alt+B`) acts on the target window:
-  - the foreground window if it occupies the gaming zone;
+- [x] Hotkey (default `Win+Ctrl+Alt+B`) acts on the target window:
+  - the foreground window if it occupies the gaming zone (or is borderless by us);
   - otherwise the last window snapped to the gaming zone, if it still exists.
-- [ ] **Off**:
+- [x] **Off**:
   1. Save the original style and ex-style per HWND.
   2. Remove `WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` and `WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE`.
   3. Call `SetWindowPos(..., SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE)` so that window rect == client rect == gaming zone.
-- [ ] **On**: restore the saved styles, then reposition so the client rect == gaming zone again.
-- [ ] Re-apply if the game restores its border:
+- [x] **On**: restore the saved styles, then reposition so the client rect == gaming zone again.
+- [x] Re-apply if the game restores its border:
   - WinEvent hook scoped to that process (`idProcess`) and window; re-check styles on foreground/location changes for that HWND only.
   - Optional per-exe slow re-check fallback (off by default).
   - Remove the hooks on `EVENT_OBJECT_DESTROY` or toggle-on.
-- [ ] Written from the Win32 docs. Borderless Gaming is a behavioural reference only (GPL-2.0; do not copy code).
-- [ ] "Keep on top" (opt-in, agreed 2026-10-13): a window snapped to a gaming zone with `gaming_over_taskbar` is made
+- [x] Written from the Win32 docs. Borderless Gaming is a behavioural reference only (GPL-2.0; do not copy code).
+- [x] "Keep on top" (opt-in, agreed 2026-10-13): a window snapped to a gaming zone with `gaming_over_taskbar` is made
   topmost so it covers the taskbar (the taskbar is itself topmost, so placement alone leaves it drawn over the game).
   Cleared when the window is snapped elsewhere or by the toggle hotkey. First check whether Win / clicking the taskbar
-  still brings the taskbar back over it.
+  still brings the taskbar back over it. *(Tom's check.)*
+
+Notes (2026-10-19, v0.4.0; Tom's answers in brackets):
+- Off and On keep the client area where it is, rather than looking the zone up again, so there's no drift by design
+  and both `gaming_fit` modes work. Off sets both styles and moves in **one** FRAMECHANGED `SetWindowPos`, so the
+  client never briefly grows into the old frame. Both are then checked with the gaming snap's measure-and-retry.
+- On keeps `WS_EX_TOPMOST` as it is now (keep-on-top owns it). A window with no border and no record of ours gets
+  a notification and no invented frame. No target window: a notification only, nothing moves [Tom].
+- The records (styles, rects) are kept in `borderless.json`, so the border can still be put back after the tray app
+  restarts. Windows that have closed are dropped at start-up.
+- Three single-event hooks per borderless window: foreground, location change (coalesced), destroy. A border the game
+  puts back is removed again around the window's place. Failsafe as in Borderless Gaming: after 3 re-applies within
+  10 s it stops and notifies; the hotkey still puts the original border back.
+- Slow re-check [Tom: build it now, only for listed exes while they're borderless]: `borderless.recheck_apps` +
+  `recheck_ms` (default 2000, minimum 250). The timer exists only while a window of a listed exe is borderless.
+- Keep on top is **per layout** [Tom]: `gaming_keep_on_top`, an editor checkbox under "May cover the taskbar"
+  (unticking that clears it). Applied only when the gaming zone really extends past the work area. Only a window we
+  made topmost is ever taken off the top again.
+- Ex-styles: PLAN's list, not Borderless Gaming's wider one (removing `LAYERED`/`APPWINDOW` can break a window or
+  drop its taskbar button).
 
 **Done when**
-- Toggling 10× on the ruler and on two real games causes no position or size drift.
-- A game that re-adds its border is corrected.
-- Idle CPU is 0.0% while a borderless game is running.
+- Toggling 10× on the ruler and on two real games causes no position or size drift. *(Ruler: 20× identical rects and
+  styles, 2026-10-19. Games: Tom.)*
+- A game that re-adds its border is corrected. *(Simulated on the ruler, including the failsafe. Games: Tom.)*
+- Idle CPU is 0.0% while a borderless game is running. *(Ruler borderless and watched: see below. Game: Tom.)*
+
+**Still to test (Tom)**
+- [ ] Two real games: snap to the gaming zone, toggle 10×, no drift, the game draws correctly.
+- [ ] A game that puts its border back (alt-tab, resolution change) gets it removed again.
+- [ ] Task Manager: GamingZones at 0.0 % CPU while a borderless game runs.
+- [ ] Keep on top with an over-the-taskbar layout: the game covers the taskbar; Win / Start and the taskbar still
+  come back over it.
 
 ### Phase 6 — Backlog (not scheduled)
 - Per-game profiles: auto-snap to the gaming zone and auto-borderless by exe on launch.

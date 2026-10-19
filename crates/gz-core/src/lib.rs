@@ -3,6 +3,7 @@
 //! All coordinates are physical pixels.
 #![forbid(unsafe_code)]
 
+pub mod borderless;
 pub mod config;
 pub mod edit;
 pub mod gaming;

@@ -458,6 +458,27 @@ fn gaming_zone_options_only_while_it_is_selected() {
 }
 
 #[test]
+fn keep_on_top_only_with_a_gaming_zone_over_the_taskbar() {
+    let mut l = three_columns();
+    edit::make_gaming_zone(&mut l, 1, WORK, MONITOR).unwrap();
+    let mut h = harness(l);
+    select(&mut h, Selection::Gaming);
+    let on_top = |h: &Harness<'_, Editor>| h.state().current().gaming_keep_on_top;
+    h.get_by_label("Keep the game on top").click();
+    h.run_steps(2);
+    assert!(!on_top(&h), "it's greyed out until the gaming zone may cover the taskbar");
+    h.get_by_label("May cover the taskbar").click();
+    h.run_steps(2);
+    h.get_by_label("Keep the game on top").click();
+    h.run_steps(2);
+    assert!(on_top(&h));
+    // Not covering the taskbar any more turns it off too.
+    h.get_by_label("May cover the taskbar").click();
+    h.run_steps(2);
+    assert!(!on_top(&h) && !h.state().current().gaming_over_taskbar);
+}
+
+#[test]
 fn stopping_a_layout_on_a_monitor() {
     let mut h = harness_with(two_layouts());
     assert!(h.query_by_label_contains("Stop using it on").is_none(), "the X shows on hover only");

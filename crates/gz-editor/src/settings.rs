@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use eframe::egui::{self, RichText, Vec2};
-use gz_core::config::{HotkeyName, SETTINGS_FILE};
+use gz_core::config::{self, HotkeyName, SETTINGS_FILE};
 use gz_core::{Capture, Captured, Color, DisabledZones, GamingFit, Hotkey, LogLevel, Modifiers, Settings};
 use gz_win::hotkey as win_hotkey;
 use gz_win::startup::{self, Elevated};
@@ -79,6 +79,7 @@ pub struct SettingsWindow {
     /// A startup change running on another thread (it may wait for a UAC prompt).
     startup_job: Option<mpsc::Receiver<Result<Startup, String>>>,
     new_exclusion: String,
+    new_recheck: String,
     now: f64,
     /// Off in the UI tests: no tray app, no registry, no hooks.
     live: bool,
@@ -135,6 +136,7 @@ impl SettingsWindow {
             startup,
             startup_job: None,
             new_exclusion: String::new(),
+            new_recheck: String::new(),
             now: 0.0,
             live,
             fake_keys: Vec::new(),
@@ -209,6 +211,7 @@ impl SettingsWindow {
                 self.overlay(ui);
                 self.small_zones(ui);
                 self.gaming(ui);
+                self.borderless(ui);
                 self.excluded(ui);
                 self.startup_section(ui);
                 self.log(ui);
@@ -241,7 +244,8 @@ impl SettingsWindow {
         section(ui, "Hotkeys");
         ui.weak("Click a box and press the new keys. Esc cancels. × turns a hotkey off.");
         ui.add_space(4.0);
-        for name in [HotkeyName::LayoutSelector, HotkeyName::GamingSnap, HotkeyName::DebugDump] {
+        for name in [HotkeyName::LayoutSelector, HotkeyName::GamingSnap, HotkeyName::Borderless, HotkeyName::DebugDump]
+        {
             self.hotkey_row(ui, name);
         }
         self.quick_switch_row(ui);
@@ -253,6 +257,7 @@ impl SettingsWindow {
             HotkeyName::DebugDump => Some(&mut h.debug_dump),
             HotkeyName::GamingSnap => Some(&mut h.gaming_snap),
             HotkeyName::LayoutSelector => Some(&mut h.layout_selector),
+            HotkeyName::Borderless => Some(&mut h.borderless),
             HotkeyName::QuickSwitch => None,
         }
     }
@@ -408,7 +413,8 @@ impl SettingsWindow {
         }
         let receiver = self.receiver.as_ref().expect("made above");
         receiver.take(); // anything left from an earlier capture
-        core_link::start_capture(receiver).ok_or_else(|| "GamingZones isn't running. Start it to change hotkeys.".into())
+        core_link::start_capture(receiver)
+            .ok_or_else(|| "GamingZones isn't running. Start it to change hotkeys.".into())
     }
 
     fn stop_capture(&mut self) {
@@ -436,8 +442,10 @@ impl SettingsWindow {
                     self.refused = Some((name, "Add Win, Ctrl or Alt.".into()));
                 }
                 Captured::WindowsShortcut(hotkey, what) => {
-                    self.refused =
-                        Some((name, format!("{} is a Windows shortcut ({what}). Choose other keys.", key_text(live, &hotkey))));
+                    self.refused = Some((
+                        name,
+                        format!("{} is a Windows shortcut ({what}). Choose other keys.", key_text(live, &hotkey)),
+                    ));
                 }
                 Captured::Unusable => self.refused = Some((name, "That key can't be used for a hotkey.".into())),
             }
@@ -452,7 +460,9 @@ impl SettingsWindow {
             Some(_) => self.stop_capture(),
             None if lost_focus || timed_out => self.stop_capture(),
             // Key presses wake the window (the hook's `wake`); this is for the time-out.
-            None => ctx.request_repaint_after(std::time::Duration::from_secs_f64(CAPTURE_TIMEOUT - (self.now - c.started))),
+            None => {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(CAPTURE_TIMEOUT - (self.now - c.started)))
+            }
         }
     }
 
@@ -463,6 +473,7 @@ impl SettingsWindow {
             HotkeyName::DebugDump => Some(&mut trial.debug_dump),
             HotkeyName::GamingSnap => Some(&mut trial.gaming_snap),
             HotkeyName::LayoutSelector => Some(&mut trial.layout_selector),
+            HotkeyName::Borderless => Some(&mut trial.borderless),
             HotkeyName::QuickSwitch => None,
         } {
             *slot = Some(hotkey);
@@ -475,7 +486,8 @@ impl SettingsWindow {
             return;
         }
         if !self.is_free(&hotkey) {
-            self.refused = Some((name, format!("{} is already used by Windows or another app.", self.key_text(&hotkey))));
+            self.refused =
+                Some((name, format!("{} is already used by Windows or another app.", self.key_text(&hotkey))));
             return;
         }
         self.refused = None;
@@ -574,48 +586,36 @@ impl SettingsWindow {
         });
     }
 
+    fn borderless(&mut self, ui: &mut egui::Ui) {
+        section(ui, "Borderless");
+        ui.weak(
+            "The \"Borderless on/off\" hotkey takes the border off the window in the gaming zone, \
+             and puts it back. If a game puts its border back, it's taken off again.",
+        );
+        ui.add_space(4.0);
+        ui.weak(
+            "Some games put their border back without Windows noticing. Add them below, and they're checked \
+             regularly while they're borderless. Most games don't need this.",
+        );
+        let b = &mut self.settings.borderless;
+        ui.horizontal(|ui| {
+            label_cell(ui, "Check every");
+            ui.add_sized(
+                [style::NUMBER_W, style::ROW_H],
+                egui::DragValue::new(&mut b.recheck_ms)
+                    .range(config::Borderless::MIN_RECHECK_MS..=60_000)
+                    .suffix(" ms")
+                    .update_while_editing(false),
+            )
+            .on_hover_text("How often the apps below are checked while they're borderless");
+            ui.weak("the apps below while they're borderless");
+        });
+        exe_list(ui, "recheck", &mut b.recheck_apps, &mut self.new_recheck, self.live);
+    }
+
     fn excluded(&mut self, ui: &mut egui::Ui) {
         section(ui, "Apps that never snap");
-        let apps = &mut self.settings.snapping.excluded_apps;
-        if apps.is_empty() {
-            ui.weak("None.");
-        }
-        let mut remove = None;
-        for (i, app) in apps.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.add_sized([LABEL_W + HOTKEY_W, style::ROW_H], egui::Label::new(app.as_str()).truncate());
-                if ui.small_button("×").on_hover_text("Remove").clicked() {
-                    remove = Some(i);
-                }
-            });
-        }
-        if let Some(i) = remove {
-            apps.remove(i);
-        }
-        ui.horizontal(|ui| {
-            let edit = egui::TextEdit::singleline(&mut self.new_exclusion).hint_text("game.exe").desired_width(LABEL_W);
-            let response = ui.add(edit);
-            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if style::sized_button(ui, "Add", style::DIALOG_W).clicked() || enter {
-                add_exclusion(apps, &self.new_exclusion);
-                self.new_exclusion.clear();
-            }
-            let live = self.live;
-            ui.menu_button("Add a running app…", |ui| {
-                let running = if live { running_apps() } else { vec!["test.exe".into()] };
-                let running: Vec<String> =
-                    running.into_iter().filter(|e| !apps.iter().any(|a| a.eq_ignore_ascii_case(e))).collect();
-                if running.is_empty() {
-                    ui.weak("No other apps with windows");
-                }
-                for exe in running {
-                    if ui.button(&exe).clicked() {
-                        add_exclusion(apps, &exe);
-                        ui.close();
-                    }
-                }
-            });
-        });
+        exe_list(ui, "excluded", &mut self.settings.snapping.excluded_apps, &mut self.new_exclusion, self.live);
     }
 
     fn startup_section(&mut self, ui: &mut egui::Ui) {
@@ -741,7 +741,50 @@ fn apply_startup(have: Startup, want: Startup, tray: &Path) -> Result<Startup, S
     Ok(want)
 }
 
-fn add_exclusion(apps: &mut Vec<String>, exe: &str) {
+/// A list of exe names with × buttons, a box to type one in and a menu of running apps.
+fn exe_list(ui: &mut egui::Ui, id: &str, apps: &mut Vec<String>, new: &mut String, live: bool) {
+    ui.push_id(id, |ui| {
+        if apps.is_empty() {
+            ui.weak("None.");
+        }
+        let mut remove = None;
+        for (i, app) in apps.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add_sized([LABEL_W + HOTKEY_W, style::ROW_H], egui::Label::new(app.as_str()).truncate());
+                if ui.small_button("×").on_hover_text("Remove").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            apps.remove(i);
+        }
+        ui.horizontal(|ui| {
+            let response = ui.add(egui::TextEdit::singleline(new).hint_text("game.exe").desired_width(LABEL_W));
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if style::sized_button(ui, "Add", style::DIALOG_W).clicked() || enter {
+                add_exe(apps, new);
+                new.clear();
+            }
+            ui.menu_button("Add a running app…", |ui| {
+                let running = if live { running_apps() } else { vec!["test.exe".into()] };
+                let running: Vec<String> =
+                    running.into_iter().filter(|e| !apps.iter().any(|a| a.eq_ignore_ascii_case(e))).collect();
+                if running.is_empty() {
+                    ui.weak("No other apps with windows");
+                }
+                for exe in running {
+                    if ui.button(&exe).clicked() {
+                        add_exe(apps, &exe);
+                        ui.close();
+                    }
+                }
+            });
+        });
+    });
+}
+
+fn add_exe(apps: &mut Vec<String>, exe: &str) {
     let exe = exe.trim();
     if !exe.is_empty() && !apps.iter().any(|a| a.eq_ignore_ascii_case(exe)) {
         apps.push(exe.to_string());
@@ -768,6 +811,7 @@ pub fn hotkey_label(name: HotkeyName) -> &'static str {
         HotkeyName::GamingSnap => "Snap to gaming zone",
         HotkeyName::DebugDump => "Window info to the log",
         HotkeyName::QuickSwitch => "Switch to layout 1-9",
+        HotkeyName::Borderless => "Borderless on/off",
     }
 }
 
@@ -809,7 +853,13 @@ fn colour_button(ui: &mut egui::Ui, colour: &mut Color, label: &str) {
     let id = ui.id().with(label).with("hex");
     let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| colour.to_string());
     let response = ui
-        .add(egui::TextEdit::singleline(&mut text).id(id.with("edit")).char_limit(7).desired_width(HEX_W).font(egui::TextStyle::Monospace))
+        .add(
+            egui::TextEdit::singleline(&mut text)
+                .id(id.with("edit"))
+                .char_limit(7)
+                .desired_width(HEX_W)
+                .font(egui::TextStyle::Monospace),
+        )
         .on_hover_text("A colour like #008CFF");
     if let (true, Ok(typed)) = (response.changed(), Color::try_from(text.clone())) {
         *colour = typed;
