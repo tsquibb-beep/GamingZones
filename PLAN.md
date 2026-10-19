@@ -341,10 +341,18 @@ default). Hotkey capture uses a low-level keyboard hook only while a capture box
 window's reload with the hotkeys it couldn't register. The admin start-up task runs at normal priority (4, not the
 default 7). The editor picks up applied.json changes the tray app makes.
 
+Follow-ups (2026-10-19): the overlap rule is hidden from settings (0.3.4, see Phase 6); colours' hex codes can be typed
+(0.3.5); new overlay defaults: zones `#4C5A7A`, white numbers, 30 % opacity (0.3.6).
+
 **Done when**
-- Behaviour survives a reboot.
+- Behaviour survives a reboot. *(Not tested yet, see below.)*
 - Hotkey conflicts are reported clearly.
 - Every setting takes effect immediately.
+
+**Still to test (Tom, when he can reboot)**
+- [ ] With Start with Windows set to "As administrator" (the task is set up; its UAC prompt was approved 2026-10-18),
+  reboot and sign in: the tray app starts by itself, and the log says `Running elevated: yes`.
+- [ ] After that reboot: layouts, the applied layout per monitor and the settings are as they were.
 
 ### Phase 5 — Borderless toggle
 - [ ] Hotkey (default `Win+Ctrl+Alt+B`) acts on the target window:
