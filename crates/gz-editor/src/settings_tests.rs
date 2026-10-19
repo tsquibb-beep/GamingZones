@@ -183,13 +183,44 @@ fn hotkeys_the_tray_app_could_not_register_are_marked() {
     assert_eq!(h.state().failed, 0);
 }
 
-fn type_exclusion(h: &mut Harness<'_, SettingsWindow>, text: &str) {
-    h.get_by_role(egui::accesskit::Role::TextInput).click();
+/// Types into the `n`th text box (the colours' hex codes, then the exclusion box), replacing
+/// what's in it.
+fn type_into(h: &mut Harness<'_, SettingsWindow>, n: usize, text: &str) {
+    text_box(h, n).click();
     h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.key_press(egui::Key::Backspace);
+    h.run_steps(1);
     for c in text.chars() {
-        h.get_by_role(egui::accesskit::Role::TextInput).type_text(&c.to_string());
+        text_box(h, n).type_text(&c.to_string());
         h.run_steps(1);
     }
+}
+
+/// The `n`th text box (the last if there are fewer).
+fn text_box<'a>(h: &'a Harness<'_, SettingsWindow>, n: usize) -> egui_kittest::Node<'a> {
+    let count = h.get_all_by_role(egui::accesskit::Role::TextInput).count();
+    h.get_all_by_role(egui::accesskit::Role::TextInput).nth(n.min(count - 1)).unwrap()
+}
+
+fn type_exclusion(h: &mut Harness<'_, SettingsWindow>, text: &str) {
+    type_into(h, usize::MAX, text);
+}
+
+#[test]
+fn typing_a_colour() {
+    let mut h = harness(Settings::default());
+    // The first box is the zone colour's. A whole colour applies as soon as it's typed.
+    type_into(&mut h, 0, "#3b4660");
+    assert_eq!(written(&h).overlay.zone_color, gz_core::Color::rgb(0x3B, 0x46, 0x60));
+    // Without the # too (the highlight colour, the third).
+    type_into(&mut h, 2, "006ED0");
+    assert_eq!(written(&h).overlay.highlight_color, gz_core::Color::rgb(0x00, 0x6E, 0xD0));
+    // Half a colour changes nothing, and leaving the box shows the colour again.
+    type_into(&mut h, 1, "#12");
+    click(&mut h, "Show zone numbers");
+    assert_eq!(written(&h).overlay.border_color, gz_core::Color::rgb(0xFF, 0xFF, 0xFF));
+    assert_eq!(text_box(&h, 1).value().as_deref(), Some("#FFFFFF"));
 }
 
 #[test]

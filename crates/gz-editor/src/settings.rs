@@ -22,6 +22,8 @@ use crate::style;
 const LABEL_W: f32 = 180.0;
 /// Width of a hotkey box.
 const HOTKEY_W: f32 = 190.0;
+/// Width of a colour's hex code box.
+const HEX_W: f32 = 72.0;
 /// A capture with no key for this long gives up (seconds).
 const CAPTURE_TIMEOUT: f64 = 15.0;
 
@@ -802,7 +804,21 @@ fn colour_button(ui: &mut egui::Ui, colour: &mut Color, label: &str) {
     let mut rgb = [colour.r, colour.g, colour.b];
     ui.color_edit_button_srgb(&mut rgb).on_hover_text(label);
     *colour = Color::rgb(rgb[0], rgb[1], rgb[2]);
-    ui.weak(colour.to_string());
+    // The hex code can be typed too. What's typed is kept while the box has focus; a whole
+    // colour applies straight away, and anything else goes back to the colour on leaving.
+    let id = ui.id().with(label).with("hex");
+    let mut text = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| colour.to_string());
+    let response = ui
+        .add(egui::TextEdit::singleline(&mut text).id(id.with("edit")).char_limit(7).desired_width(HEX_W).font(egui::TextStyle::Monospace))
+        .on_hover_text("A colour like #008CFF");
+    if let (true, Ok(typed)) = (response.changed(), Color::try_from(text.clone())) {
+        *colour = typed;
+    }
+    if response.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, text));
+    } else {
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
 }
 
 impl eframe::App for SettingsWindow {
