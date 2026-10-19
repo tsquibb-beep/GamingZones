@@ -86,7 +86,8 @@ impl Snapping {
     }
 }
 
-/// Zone overlay colours (FancyZones' defaults). The whole overlay is drawn at `opacity`.
+/// Zone overlay colours (chosen 2026-10-19; FancyZones' are #F5FCFF zones, black numbers, 50 %). The whole
+/// overlay is drawn at `opacity`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Overlay {
@@ -115,12 +116,12 @@ pub enum DisabledZones {
 impl Default for Overlay {
     fn default() -> Self {
         Self {
-            zone_color: Color::rgb(0xF5, 0xFC, 0xFF),
+            zone_color: Color::rgb(0x4C, 0x5A, 0x7A),
             border_color: Color::rgb(0xFF, 0xFF, 0xFF),
             highlight_color: Color::rgb(0x00, 0x8C, 0xFF),
-            number_color: Color::rgb(0x00, 0x00, 0x00),
+            number_color: Color::rgb(0xFF, 0xFF, 0xFF),
             show_numbers: true,
-            opacity: 50,
+            opacity: 30,
             disabled_zones: DisabledZones::Greyed,
             disabled_color: Color::rgb(0x80, 0x80, 0x80),
             flash_on_switch: true,
