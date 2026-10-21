@@ -394,14 +394,16 @@ Notes (2026-10-19, v0.4.0; Tom's answers in brackets):
 
 **Done when**
 - Toggling 10× on the ruler and on two real games causes no position or size drift. *(Ruler: 20× identical rects and
-  styles, 2026-10-19. Games: Tom.)*
-- A game that re-adds its border is corrected. *(Simulated on the ruler, including the failsafe. Games: Tom.)*
-- Idle CPU is 0.0% while a borderless game is running. *(Ruler borderless and watched: see below. Game: Tom.)*
+  styles, 2026-10-19. Games: Tom, working so far.)*
+- A game that re-adds its border is corrected. *(Simulated on the ruler, including the failsafe. No game has done it in real use yet.)*
+- Idle CPU is 0.0% while a borderless game is running. *(Ruler: 0.000 s. Game: Tom, 2026-10-21.)*
 
 **Still to test (Tom)**
-- [ ] Two real games: snap to the gaming zone, toggle 10×, no drift, the game draws correctly.
-- [ ] A game that puts its border back (alt-tab, resolution change) gets it removed again.
-- [ ] Task Manager: GamingZones at 0.0 % CPU while a borderless game runs.
+- [x] Two real games: snap to the gaming zone, toggle 10×, no drift, the game draws correctly. *(Tom, 2026-10-21:
+  working so far; real-world use continues.)*
+- [x] A game that puts its border back (alt-tab, resolution change) gets it removed again. *(Tom: no problems. The log
+  has no real game putting its border back yet, so only the ruler simulation has exercised the re-apply.)*
+- [x] Task Manager: GamingZones at 0.0 % CPU while a borderless game runs. *(Tom, 2026-10-21.)*
 - [ ] Keep on top with an over-the-taskbar layout: the game covers the taskbar; Win / Start and the taskbar still
   come back over it.
 
