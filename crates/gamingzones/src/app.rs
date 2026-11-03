@@ -70,12 +70,20 @@ const TIMER_CAPTURE: usize = 2;
 const CAPTURE_MAX_MS: u32 = 30_000;
 /// `WM_TIMER` id: re-check borderless windows of `borderless.recheck_apps`.
 const TIMER_RECHECK: usize = 3;
+/// `WM_TIMER` id: try to add the tray icon again. Exists only while the icon is missing.
+const TIMER_TRAY: usize = 4;
+const TRAY_RETRY_MS: u32 = 2_000;
+/// Give up after this many retries (a minute); `TaskbarCreated` still adds the icon later.
+const TRAY_RETRIES: u32 = 30;
 
 pub struct App {
     config_dir: PathBuf,
     settings: Settings,
     zones: ZoneConfig,
     tray: Option<TrayIcon>,
+    tray_retries: u32,
+    /// A notification raised while the tray icon was missing, shown once it's there.
+    pending_notification: Option<(String, String)>,
     registered: Vec<i32>,
     reload_msg: u32,
     capture_msg: u32,
@@ -110,6 +118,8 @@ pub fn start(config_dir: PathBuf) -> gz_win::Result<Hwnd> {
         settings: Settings::default(),
         zones: ZoneConfig::default(),
         tray: None,
+        tray_retries: 0,
+        pending_notification: None,
         registered: Vec::new(),
         reload_msg: window::register_window_message(RELOAD_MESSAGE),
         capture_msg: window::register_window_message(CAPTURE_MESSAGE),
@@ -146,15 +156,14 @@ impl App {
     fn on_create(&mut self, hwnd: Hwnd) {
         dump::log_self(hwnd);
         // If we run elevated, the (possibly non-elevated) editor must still reach us.
-        for m in [self.reload_msg, self.capture_msg, msg::COPYDATA] {
+        // TaskbarCreated comes from Explorer, which isn't elevated: without this an elevated
+        // tray app never hears that the taskbar exists or was restarted.
+        for m in [self.reload_msg, self.capture_msg, msg::COPYDATA, self.taskbar_created_msg] {
             if let Err(e) = win_ipc::allow_message(hwnd, m) {
                 log::warn!("Could not allow message {m:#X} from other processes: {}", e.message());
             }
         }
-        match TrayIcon::add(hwnd, WM_TRAY, "GamingZones") {
-            Ok(tray) => self.tray = Some(tray),
-            Err(e) => log::error!("Could not add the tray icon: {}", e.message()),
-        }
+        self.add_tray_icon(hwnd);
         self.reload(hwnd, false);
         self.borderless.load(hwnd);
         self.update_recheck(hwnd);
@@ -255,11 +264,77 @@ impl App {
         failed_mask
     }
 
-    fn notify(&self, title: &str, text: &str) {
-        if let Some(tray) = &self.tray {
-            if let Err(e) = tray.balloon(title, text, true) {
-                log::warn!("Tray notification failed: {}", e.message());
+    fn notify(&mut self, title: &str, text: &str) {
+        match &self.tray {
+            Some(tray) if tray.is_shown() => {
+                if let Err(e) = tray.balloon(title, text, true) {
+                    log::warn!("Tray notification failed: {}", e.message());
+                }
             }
+            // Keep the latest one until the icon is there.
+            _ => self.pending_notification = Some((title.to_string(), text.to_string())),
+        }
+    }
+
+    /// Loads the icon (fresh, so it suits the taskbar's current DPI) and adds it to the tray.
+    /// At sign-in the scheduled task can start us before Explorer's taskbar is ready; then
+    /// a short-lived timer tries again, and `TaskbarCreated` adds it when the taskbar appears.
+    fn add_tray_icon(&mut self, hwnd: Hwnd) {
+        window::kill_timer(hwnd, TIMER_TRAY);
+        self.tray = None; // removes an old icon, if any
+        let mut tray = match TrayIcon::new(hwnd, WM_TRAY, "GamingZones") {
+            Ok(tray) => tray,
+            Err(e) => {
+                log::error!("Could not load the tray icon: {}", e.message());
+                return;
+            }
+        };
+        let shown = tray.show();
+        self.tray = Some(tray);
+        match shown {
+            Ok(()) => self.tray_icon_shown(),
+            Err(e) => {
+                log::warn!("Could not add the tray icon yet ({}); trying again", e.message());
+                self.tray_retries = 0;
+                if let Err(e) = window::set_timer(hwnd, TIMER_TRAY, TRAY_RETRY_MS) {
+                    log::error!("Could not start the tray icon retry timer: {}", e.message());
+                }
+            }
+        }
+    }
+
+    fn retry_tray_icon(&mut self, hwnd: Hwnd) {
+        let Some(tray) = &mut self.tray else {
+            window::kill_timer(hwnd, TIMER_TRAY);
+            return;
+        };
+        self.tray_retries += 1;
+        match tray.show() {
+            Ok(()) => {
+                window::kill_timer(hwnd, TIMER_TRAY);
+                self.tray_icon_shown();
+            }
+            Err(e) if self.tray_retries >= TRAY_RETRIES => {
+                window::kill_timer(hwnd, TIMER_TRAY);
+                log::error!(
+                    "Could not add the tray icon after {} tries ({}); waiting for the taskbar to appear",
+                    self.tray_retries + 1,
+                    e.message()
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn tray_icon_shown(&mut self) {
+        if self.tray_retries > 0 {
+            log::info!("Tray icon added (retry {})", self.tray_retries);
+        } else {
+            log::info!("Tray icon added");
+        }
+        self.tray_retries = 0;
+        if let Some((title, text)) = self.pending_notification.take() {
+            self.notify(&title, &text);
         }
     }
 
@@ -290,7 +365,7 @@ impl App {
     /// Starts gz-editor.exe from our own folder (with `--settings`, the settings window).
     /// It's a separate process, so nothing of it stays in ours once it exits; it keeps
     /// itself to one window.
-    fn open_editor(&self, args: &[&str]) {
+    fn open_editor(&mut self, args: &[&str]) {
         let path = std::env::current_exe().unwrap_or_default().with_file_name("gz-editor.exe");
         match std::process::Command::new(&path).args(args).spawn() {
             Ok(child) => log::info!("Started gz-editor {} (pid {})", args.join(" "), child.id()),
@@ -728,6 +803,7 @@ impl App {
 
     fn on_destroy(&mut self, hwnd: Hwnd) {
         window::kill_timer(hwnd, TIMER_RECHECK);
+        window::kill_timer(hwnd, TIMER_TRAY);
         self.drag = None;
         self.flash = None;
         self.selector = None;
@@ -809,6 +885,7 @@ impl WindowHandler for App {
                     log::debug!("Hotkey capture timed out");
                 }
             }
+            msg::TIMER if m.wparam == TIMER_TRAY => self.retry_tray_icon(hwnd),
             msg::TIMER if m.wparam == TIMER_RECHECK => {
                 let outcomes = self.borderless.recheck(&self.settings.borderless);
                 for o in outcomes {
@@ -864,12 +941,8 @@ impl WindowHandler for App {
             }
             other if other != 0 && other == self.capture_msg => return Some(self.on_capture(hwnd, m)),
             other if other != 0 && other == self.taskbar_created_msg => {
-                log::info!("Taskbar re-created; adding the tray icon again");
-                if let Some(tray) = &self.tray {
-                    if let Err(e) = tray.re_add() {
-                        log::error!("Could not re-add the tray icon: {}", e.message());
-                    }
-                }
+                log::info!("Taskbar created; adding the tray icon");
+                self.add_tray_icon(hwnd);
             }
             _ => return None,
         }

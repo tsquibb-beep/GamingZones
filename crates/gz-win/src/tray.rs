@@ -25,20 +25,37 @@ pub struct TrayIcon {
     icon: HICON,
     callback_msg: u32,
     tip: String,
+    shown: bool,
 }
 
 impl TrayIcon {
-    /// Adds the icon (exe icon resource 1). Clicks arrive at `hwnd` as `callback_msg`
-    /// with the mouse message (e.g. `WM_RBUTTONUP`) in the low word of lParam.
-    pub fn add(hwnd: Hwnd, callback_msg: u32, tip: &str) -> crate::Result<TrayIcon> {
+    /// Loads the icon (exe icon resource 1) without adding it to the tray yet; call `show`.
+    /// Clicks arrive at `hwnd` as `callback_msg` with the mouse message (e.g. `WM_RBUTTONUP`)
+    /// in the low word of lParam.
+    pub fn new(hwnd: Hwnd, callback_msg: u32, tip: &str) -> crate::Result<TrayIcon> {
         let icon = unsafe {
             let instance = GetModuleHandleW(None)?;
             // LoadIconMetric picks the right size for the current DPI.
             LoadIconMetric(Some(instance.into()), crate::int_resource(1), LIM_SMALL)?
         };
-        let tray = TrayIcon { hwnd, icon, callback_msg, tip: tip.to_string() };
-        tray.notify(NIM_ADD, tray.data())?;
-        Ok(tray)
+        Ok(TrayIcon { hwnd, icon, callback_msg, tip: tip.to_string(), shown: false })
+    }
+
+    /// Adds the icon to the tray. Fails while Explorer's taskbar isn't ready (early at sign-in).
+    /// `NIM_ADD` can also time out on a busy Explorer yet still add the icon, or fail because the
+    /// icon is already there, so a failed add counts as shown when `NIM_MODIFY` then works.
+    pub fn show(&mut self) -> crate::Result<()> {
+        let added = self.notify(NIM_ADD, self.data());
+        self.shown = added.is_ok() || self.notify(NIM_MODIFY, self.data()).is_ok();
+        if self.shown {
+            Ok(())
+        } else {
+            added
+        }
+    }
+
+    pub fn is_shown(&self) -> bool {
+        self.shown
     }
 
     fn data(&self) -> NOTIFYICONDATAW {
@@ -63,11 +80,6 @@ impl TrayIcon {
         }
     }
 
-    /// Adds the icon again after Explorer restarts (`TaskbarCreated`).
-    pub fn re_add(&self) -> crate::Result<()> {
-        self.notify(NIM_ADD, self.data())
-    }
-
     /// Shows a Windows notification from the tray icon.
     pub fn balloon(&self, title: &str, text: &str, warning: bool) -> crate::Result<()> {
         let mut nid = self.data();
@@ -81,7 +93,9 @@ impl TrayIcon {
 
 impl Drop for TrayIcon {
     fn drop(&mut self) {
-        let _ = self.notify(NIM_DELETE, self.data());
+        if self.shown {
+            let _ = self.notify(NIM_DELETE, self.data());
+        }
         unsafe {
             let _ = DestroyIcon(self.icon);
         }
