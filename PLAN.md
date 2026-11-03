@@ -350,9 +350,20 @@ Follow-ups (2026-10-19): the overlap rule is hidden from settings (0.3.4, see Ph
 - Every setting takes effect immediately.
 
 **Still to test (Tom, when he can reboot)**
-- [ ] With Start with Windows set to "As administrator" (the task is set up; its UAC prompt was approved 2026-10-18),
-  reboot and sign in: the tray app starts by itself, and the log says `Running elevated: yes`.
+- [x] With Start with Windows set to "As administrator" (the task is set up; its UAC prompt was approved 2026-10-18),
+  reboot and sign in: the tray app starts by itself, and the log says `Running elevated: yes`. *(Seen at the sign-ins
+  on 23, 24 and 25 Oct; hotkeys and the selector worked.)*
 - [ ] After that reboot: layouts, the applied layout per monitor and the settings are as they were.
+- [ ] After a reboot with the 0.4.1 tray-icon fix: the tray icon appears at sign-in (log: `Tray icon added`, maybe
+  after a retry or `Taskbar created`).
+
+Bug found by that reboot (fixed 2026-11-03, 0.4.1, ce30b53): at every sign-in the task started the tray app before
+Explorer's taskbar existed, and the log said `Could not add the tray icon: Unspecified error`. There was no icon
+(hotkeys still worked). There were two faults: a failed first add was never retried, and Explorer's `TaskbarCreated`
+broadcast never reached the elevated tray app, because UIPI drops it from the non-elevated Explorer. Now
+`TaskbarCreated` is allowed through, a failed add is retried every 2 s for up to a minute (that timer exists only while
+the icon is missing), and a notification raised while the icon is missing is shown when it appears. The same fix covers
+Explorer restarts.
 
 ### Phase 5 — Borderless toggle
 - [x] Hotkey (default `Win+Ctrl+Alt+B`) acts on the target window:
